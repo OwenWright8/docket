@@ -2,7 +2,7 @@
 import { type DB, type TaskRow, tx } from "./db.ts";
 import type { ParsedTask } from "./parse.ts";
 import { type Recurrence, describe, firstDue, nextDue, normalizeRecurrence } from "./recurrence.ts";
-import { isHm, isYmd, todayYmd } from "./time.ts";
+import { addDays, isHm, isYmd, todayYmd } from "./time.ts";
 
 export interface PublicTask {
   id: number;
@@ -18,6 +18,9 @@ export interface PublicTask {
   emailId: number | null;
   doneAt: number | null;
   lastDone: number | null;
+  /** Re-push every this many minutes until it's done (0: remind once). */
+  nagMinutes: number;
+  snoozedUntil: number | null;
   createdAt: number;
 }
 
@@ -46,6 +49,8 @@ export function publicTask(row: TaskRow, lastDone?: number | null): PublicTask {
     emailId: row.email_id,
     doneAt: row.done_at,
     lastDone: lastDone ?? null,
+    nagMinutes: row.nag_minutes ?? 0,
+    snoozedUntil: row.snoozed_until && row.snoozed_until > Date.now() ? row.snoozed_until : null,
     createdAt: row.created_at,
   };
 }
@@ -67,10 +72,15 @@ export interface TaskInput {
   dueTime?: unknown;
   recurrence?: unknown;
   priority?: unknown;
+  nagMinutes?: unknown;
 }
 
 /** Checks a create/update body. `partial` keeps fields that weren't sent. */
-export function cleanInput(body: TaskInput, existing?: TaskRow): { ok: true; row: Omit<TaskRow, "id" | "source" | "email_id" | "done_at" | "notified_for" | "created_at" | "updated_at"> } | { ok: false; error: string } {
+type CleanRow = Pick<TaskRow, "title" | "notes" | "list" | "due_date" | "due_time" | "recurrence" | "priority" | "nag_minutes">;
+
+export const NAG_CHOICES = [0, 10, 15, 30, 60, 120];
+
+export function cleanInput(body: TaskInput, existing?: TaskRow): { ok: true; row: CleanRow } | { ok: false; error: string } {
   const has = (k: keyof TaskInput) => body[k] !== undefined;
   const title = has("title") ? String(body.title ?? "").trim().slice(0, 200) : (existing?.title ?? "");
   if (!title) return { ok: false, error: "Give the task a name" };
@@ -90,7 +100,9 @@ export function cleanInput(body: TaskInput, existing?: TaskRow): { ok: true; row
   if (!dueDate) dueTime = null;
   const p = has("priority") ? Number(body.priority) : (existing?.priority ?? 1);
   const priority = p === 0 || p === 2 ? p : 1;
-  return { ok: true, row: { title, notes, list, due_date: dueDate, due_time: dueTime, recurrence: rec ? JSON.stringify(rec) : null, priority } };
+  const n = has("nagMinutes") ? Number(body.nagMinutes) : (existing?.nag_minutes ?? 0);
+  const nag = NAG_CHOICES.includes(n) ? n : 0;
+  return { ok: true, row: { title, notes, list, due_date: dueDate, due_time: dueTime, recurrence: rec ? JSON.stringify(rec) : null, priority, nag_minutes: nag } };
 }
 
 export function createTask(db: DB, input: TaskInput, meta: { source?: string; emailId?: number | null } = {}): TaskRow | { error: string } {
@@ -100,10 +112,10 @@ export function createTask(db: DB, input: TaskInput, meta: { source?: string; em
   const r = c.row;
   const res = db
     .prepare(
-      `INSERT INTO tasks (title, notes, list, due_date, due_time, recurrence, priority, source, email_id, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO tasks (title, notes, list, due_date, due_time, recurrence, priority, nag_minutes, source, email_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(r.title, r.notes, r.list, r.due_date, r.due_time, r.recurrence, r.priority, meta.source ?? "manual", meta.emailId ?? null, now, now);
+    .run(r.title, r.notes, r.list, r.due_date, r.due_time, r.recurrence, r.priority, r.nag_minutes, meta.source ?? "manual", meta.emailId ?? null, now, now);
   return getTask(db, Number(res.lastInsertRowid))!;
 }
 
@@ -119,9 +131,9 @@ export function updateTask(db: DB, id: number, input: TaskInput): TaskRow | { er
   const r = c.row;
   const moved = r.due_date !== existing.due_date || r.due_time !== existing.due_time;
   db.prepare(
-    `UPDATE tasks SET title = ?, notes = ?, list = ?, due_date = ?, due_time = ?, recurrence = ?, priority = ?, updated_at = ?,
-       notified_for = CASE WHEN ? THEN NULL ELSE notified_for END WHERE id = ?`,
-  ).run(r.title, r.notes, r.list, r.due_date, r.due_time, r.recurrence, r.priority, Date.now(), moved ? 1 : 0, id);
+    `UPDATE tasks SET title = ?, notes = ?, list = ?, due_date = ?, due_time = ?, recurrence = ?, priority = ?, nag_minutes = ?, updated_at = ? WHERE id = ?`,
+  ).run(r.title, r.notes, r.list, r.due_date, r.due_time, r.recurrence, r.priority, r.nag_minutes, Date.now(), id);
+  if (moved) resetPushes(db, id);
   return getTask(db, id)!;
 }
 
@@ -141,8 +153,9 @@ export function completeTask(db: DB, id: number, action: "done" | "skipped", now
     const log = db
       .prepare("INSERT INTO task_log (task_id, at, on_date, action, prev_due, next_due) VALUES (?, ?, ?, ?, ?, ?)")
       .run(id, now.getTime(), today, action, t.due_date, next);
-    if (rec) db.prepare("UPDATE tasks SET due_date = ?, notified_for = NULL, updated_at = ? WHERE id = ?").run(next, now.getTime(), id);
+    if (rec) db.prepare("UPDATE tasks SET due_date = ?, updated_at = ? WHERE id = ?").run(next, now.getTime(), id);
     else db.prepare("UPDATE tasks SET done_at = ?, updated_at = ? WHERE id = ?").run(now.getTime(), now.getTime(), id);
+    resetPushes(db, id);
     return { task: getTask(db, id)!, logId: Number(log.lastInsertRowid) };
   });
 }
@@ -158,6 +171,7 @@ export function undoLog(db: DB, logId: number): TaskRow | null {
     if (latest.id !== entry.id) return null;
     const t = getTask(db, entry.task_id);
     if (!t) return null;
+    // The reminder for the restored date isn't sent again (it already went out).
     if (parseRecurrence(t)) db.prepare("UPDATE tasks SET due_date = ?, updated_at = ? WHERE id = ?").run(entry.prev_due, Date.now(), t.id);
     else db.prepare("UPDATE tasks SET done_at = NULL, updated_at = ? WHERE id = ?").run(Date.now(), t.id);
     db.prepare("DELETE FROM task_log WHERE id = ?").run(entry.id);
@@ -171,4 +185,28 @@ export function openTasks(db: DB): TaskRow[] {
 
 export function knownLists(db: DB): string[] {
   return (db.prepare("SELECT DISTINCT list FROM tasks WHERE list IS NOT NULL ORDER BY list COLLATE NOCASE").all() as { list: string }[]).map((r) => r.list);
+}
+
+/** A new due date (or done): the reminder, nags and snooze start over. */
+export function resetPushes(db: DB, id: number) {
+  db.prepare("UPDATE tasks SET notified_for = NULL, nag_count = 0, last_pushed_at = NULL, snoozed_until = NULL WHERE id = ?").run(id);
+}
+
+/** Push this task again in `minutes` (and hold off any nag until then). */
+export function snoozeTask(db: DB, id: number, minutes: number, now = Date.now()): TaskRow | null {
+  const t = getTask(db, id);
+  if (!t || t.done_at) return null;
+  const until = now + minutes * 60_000;
+  db.prepare("UPDATE tasks SET snoozed_until = ?, notified_for = coalesce(notified_for, CASE WHEN due_time IS NOT NULL THEN due_date || ' ' || due_time END) WHERE id = ?").run(until, id);
+  return getTask(db, id)!;
+}
+
+/** Moves a task to tomorrow, keeping its time. A repeating task's schedule carries on from there. */
+export function moveToTomorrow(db: DB, id: number, now = new Date()): TaskRow | null {
+  const t = getTask(db, id);
+  if (!t || t.done_at) return null;
+  const tomorrow = addDays(todayYmd(now), 1);
+  db.prepare("UPDATE tasks SET due_date = ?, updated_at = ? WHERE id = ?").run(tomorrow, now.getTime(), id);
+  resetPushes(db, id);
+  return getTask(db, id)!;
 }

@@ -13,7 +13,7 @@ Type "I feed the dart frogs every other day and the gecko every other day" and g
 ![amd64 | arm64](https://img.shields.io/badge/arch-amd64%20%7C%20arm64-555)
 [![MIT license](https://img.shields.io/github/license/OwenWright8/docket)](LICENSE)
 
-[Quickstart](#quickstart) · [Your local AI](#connecting-your-local-ai) · [Email](#email) · [How it works](#how-it-works) · [Settings](#settings) · [Updating](#updating) · [FAQ](#faq)
+[Quickstart](#quickstart) · [Your local AI](#connecting-your-local-ai) · [Notifications](#notifications) · [Email](#email) · [Calendars and carrel](#calendars-and-carrel) · [Homepage widget](#homepage-widget) · [How it works](#how-it-works) · [Settings](#settings) · [FAQ](#faq)
 
 </div>
 
@@ -26,7 +26,12 @@ Reminder apps want you to fill in a form for every chore: title, date, repeat, e
 - **Your email, sorted.** Docket reads your inbox (read-only) and picks out what needs you: bills, appointments, a professor's email. Promotions, newsletters and spam are filtered out. Email that asks you to do something becomes a suggested task, date included. One click adds it.
 - **It learns your senders.** "Always show" or "Always ignore" a sender or a whole domain from any email. Your rules beat the AI.
 - **A morning summary.** Every morning, a few sentences on what's overdue, what's on today, what's coming and which email needs you, pushed to your phone.
-- **Reminders on your phone.** Tasks with a time push through Pushover or ntfy when they're due.
+- **Reminders on your phone, with buttons.** Tasks with a time push through ntfy or Pushover when they're due, with **Done**, **Snooze** and **Tomorrow** right on the notification.
+- **Nag mode.** For the things you can't let slide (feeding, meds): it pushes again every 10 minutes to 2 hours until it's done, and stays quiet overnight.
+- **Your calendar and carrel.** Today's events from any calendar's private link, and assignments, readings, exams and quizzes from [carrel](https://github.com/OwenWright8/carrel), on your Today page and in the morning summary.
+- **Waiting on a reply.** Email you sent that asked for something is tracked until the answer comes in, and you get one nudge if it doesn't.
+- **Ask it things.** "When did I last feed the gecko?", "What's due this week?", "Did the vet ever get back to me?" End what you type with a question mark.
+- **Outlook and school accounts.** Sign in with Microsoft for Outlook.com and Microsoft 365 work or school mail, which don't allow passwords.
 - **Works when your PC is off.** Without the AI, quick add uses built-in rules (they handle all the examples above), email is sorted with basic checks, and the AI goes back over that email once it's reachable again.
 - **Yours to run.** One small container, one volume, no accounts anywhere, and nothing sent to a cloud AI. Works on a Raspberry Pi.
 
@@ -68,8 +73,8 @@ docker compose up -d
 | Step | What you need |
 |---|---|
 | **Local AI** | Your PC's address and a model (see below). You can skip this and add it later. |
-| **Notifications** | A [Pushover](https://pushover.net) application token and user key, and/or an [ntfy](https://ntfy.sh) topic. **Save and send a test** checks them. |
-| **Email** | Optional. Your IMAP server (presets for Gmail, Outlook, iCloud, Yahoo and Fastmail) and an app password. |
+| **Notifications** | An [ntfy](https://ntfy.sh) server and topic, and/or a [Pushover](https://pushover.net) application token and user key. **Save and send a test** checks them. |
+| **Email** | Optional. Gmail, iCloud, Yahoo, Fastmail or any IMAP server with an app password, or **Sign in with Microsoft** for Outlook and school / work accounts. |
 
 That's it. Type your first task on the Today page.
 
@@ -91,6 +96,23 @@ The model is asked for JSON that matches a fixed shape, and every answer is chec
 
 **About you** (in the same section) is a line or two the model keeps in mind: "I'm a student at Wabash (wabash.edu). I keep dart frogs and a leopard gecko. Anything from my bank or landlord is important." It makes a real difference to email sorting.
 
+## Notifications
+
+Set up **ntfy**, **Pushover**, or both, under **Settings → Notifications**.
+
+**ntfy** works like Uptime Kuma's ntfy notification:
+
+| Field | What to put |
+|---|---|
+| **Server URL** | Without the topic: `https://ntfy.sh`, or your own server. On the same Docker network as your ntfy container, its service name works: `http://ntfy:80`. |
+| **Topic** | Any name; subscribe to the same topic in the ntfy app. On ntfy.sh, pick something hard to guess. |
+| **Priority** | 1–5 (default 3). Urgent pushes (nags, high-priority tasks, email you need to act on) go one higher. |
+| **Authentication** | None, **Username and password**, or an **Access token** (`tk_…`) for a protected topic. |
+
+**Done / Snooze buttons.** Reminders come with **Done**, **Snooze 1 h** and **Tomorrow** (or **Skip** for a repeating task). On ntfy they're buttons on the notification itself; Pushover can't show buttons, so tapping its link opens a small page with them. Both need **Docket's address** (in the same section) to be one your phone can reach, like `https://docket.yourdomain.org` behind your reverse proxy or a VPN address. Each button is signed for that one task and due date, works without signing in, and stops working once the task has moved on.
+
+**Nag mode.** In a task's editor, **Nag me** re-pushes it every 10, 15 or 30 minutes, or every 1 or 2 hours, after its time (a task with only a date starts at your summary time) until it's done or snoozed. Nags pause from 10 PM to 7 AM and stop after 12.
+
 ## Email
 
 Docket connects to your mailbox over IMAP and opens the folder **read-only**: nothing is marked as read, moved or deleted. It checks every 15 minutes (you can change that) and, on the first check, looks back 3 days.
@@ -100,7 +122,7 @@ Most providers need an **app password** rather than your normal one:
 | Provider | Where |
 |---|---|
 | Gmail | Turn on 2-Step Verification, then [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords) |
-| Outlook / Hotmail | account.microsoft.com → Security → App passwords (some work and school accounts block IMAP) |
+| Outlook, Hotmail, Microsoft 365 work or school | **Sign in with Microsoft** (below): Microsoft doesn't allow passwords for IMAP any more |
 | iCloud | [account.apple.com](https://account.apple.com) → Sign-In and Security → App-Specific Passwords |
 | Yahoo | Account security → Generate app password |
 | Fastmail | Settings → Privacy & Security → App passwords, with IMAP access |
@@ -119,7 +141,78 @@ In order, Docket checks: **your sender rules** (always important / always ignore
 
 Only the sender, subject, a short excerpt and the AI's one-line summary are kept. The full body is held only until the AI has read it. Gmail messages get an **Open in Gmail** link.
 
+### Outlook and school / work accounts (Sign in with Microsoft)
+
+Microsoft turned off password sign-in for IMAP, so Outlook.com, Hotmail and Microsoft 365 accounts sign in with Microsoft instead. Docket uses Microsoft's **device code** sign-in: it shows a short code, you enter it at [microsoft.com/devicelogin](https://microsoft.com/devicelogin) on any device and sign in as usual (Authenticator, passkey, your school's sign-in page). It needs no redirect back to Docket, so it works on a plain `http://` LAN address.
+
+**One-time setup:** register Docket as an app with Microsoft. It's free, and the steps are also in the app:
+
+1. Sign in at [entra.microsoft.com → App registrations](https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade). A school account can usually do this; if it says you don't have permission, use a personal Microsoft account with a free Azure account.
+2. **New registration**, name it Docket, and under **Supported account types** choose **Accounts in any organizational directory and personal Microsoft accounts**. Leave the redirect URI empty.
+3. **Authentication → Allow public client flows: Yes**, and save.
+4. **API permissions → Add a permission → Microsoft Graph → Delegated**: `IMAP.AccessAsUser.All`, `offline_access`, `openid`, `email`, `profile`.
+5. Paste the **Application (client) ID** into Docket (**Settings → Email → Add → Outlook, Hotmail, or school / work**), then **Sign in with Microsoft**.
+
+**School and work accounts** are run by your organization's IT, and some policies get in the way. Docket says which one in plain words instead of an error code:
+
+| What Docket says | What to do |
+|---|---|
+| IT has to approve this app | Your organization requires admin consent. Send IT the client id and ask them to grant consent for `IMAP.AccessAsUser.All`. |
+| Your organization blocks this kind of sign-in | A Conditional Access policy blocks device-code sign-in. Ask IT, or forward your school mail to an account Docket can read. |
+| Won't open the mailbox over IMAP | IMAP is switched off for your mailbox. IT can turn it on for you. |
+| Only lets assigned people use this app | IT has to assign the app to you. |
+
+If IT approved the app for your organization only, set **Accounts** (next to the client id) to your school's domain, like `wabash.edu`, instead of `common`. The mailbox is the account's sign-in name from Microsoft (e.g. `you@school.edu`). Docket keeps a refresh token in the data volume and renews the short-lived access token before each check. If Microsoft ever asks you to sign in again (a password change, or IT revoking sessions), the account shows **Needs sign-in** and **Sign in with Microsoft again** fixes it.
+
+### Waiting on a reply
+
+With **Watch for replies** on (per account; on by default), Docket also reads your **Sent** folder, read-only. The AI picks out what you sent that expects an answer, like a question or a request. Thank-yous and FYIs are left out. Each one waits in **Inbox → Waiting on** until a reply arrives, matched by the email's thread headers or the same person and subject. After 3 days (you can change this) without one, you get a single push and it's mentioned in the morning summary. **Follow-up task** turns it into a task for today.
+
 Got one wrong? Use **Move to** in the email's menu, or **Always show / Ignore** the sender, which also re-sorts the email you already have from them.
+
+## Calendars and carrel
+
+**Settings → Calendars and carrel** adds:
+
+- **Any calendar** by its private iCalendar (`.ics`) link. In Google Calendar, open a calendar's settings → **Integrate calendar → Secret address in iCal format**. In iCloud, share the calendar as a Public Calendar and copy the `webcal://` link. In Outlook.com, go to **Settings → Calendar → Shared calendars → Publish a calendar** and copy the ICS link. Repeating events, moved or cancelled occurrences, all-day and multi-day events and time zones are all handled. The private link is never sent back to the browser.
+- **carrel**: its address, your email and password. Docket signs in to carrel's API as you and reads assignments, readings, exams and quizzes from your current courses (archived courses are skipped). Mark things done in carrel; they drop off Docket on the next read.
+
+Both are read every 30 minutes and never changed. Today's items show in a **Schedule** card on the Today page (school work past due and coming this week under it), and in the morning summary and the ask box.
+
+## Asking questions
+
+Type a question ending in `?` into the box on the Today page ("when did I last feed the gecko?", "what do I have Thursday?", "did Prof. Lee reply about the extension?"). Your local AI answers from your open tasks, the last 90 days of what you did, your calendar and carrel, and recent email. It's told to say so when it doesn't know rather than guess. If it was actually a task, **It was a task, add it** adds it.
+
+## Homepage widget
+
+Show today's numbers on a [Homepage](https://gethomepage.dev) dashboard with its [Custom API widget](https://gethomepage.dev/widgets/services/customapi/). **Settings → Homepage widget → Create key** shows the key once with a ready-to-paste snippet:
+
+```yaml
+- Docket:
+    icon: http://<docket>:8585/icon-192.png
+    href: http://<docket>:8585/
+    widget:
+      type: customapi
+      url: http://<docket>:8585/api/widget
+      refreshInterval: 60000
+      headers:
+        X-Api-Key: dkt_your_key_here
+      mappings:
+        - field: due_today
+          label: Today
+          format: number
+        - field: overdue
+          label: Overdue
+          format: number
+        - field: inbox
+          label: Email
+          format: number
+        - field: waiting
+          label: No reply
+          format: number
+```
+
+Also returned: `done_today`, `open`, `events_today`, `next_task`, `next_event`, and `ai` (`online`, `offline` or `off`). Keys only read these numbers, are stored hashed, and can be revoked in Settings.
 
 ## How it works
 
@@ -161,7 +254,8 @@ And in **Settings** in the app:
 |---|---|---|
 | **Daily summary** | On, 7:00 AM, pushed | When the morning summary is written and whether it's pushed. |
 | **Push reminders** | On, at the time | Push tasks with a time, at the time or up to an hour before. Date-only tasks appear in the summary instead. |
-| **Push email that needs you** | On | Push To do and Important email as soon as it's sorted. Four or more at once arrive as one push. |
+| **Push email that needs you** | On | Push To do and Important email as soon as it's sorted (four or more at once arrive as one push), and once when something you sent has had no reply. |
+| **Waiting on a reply** | 3 days | How long before unanswered email you sent is flagged. |
 | **Check every** | 15 min | How often each email account is checked. |
 | **First check looks back** | 3 days | How far back the first check of a new account goes. |
 | **Docket's address** | — | Tapping a notification opens this. |
@@ -191,7 +285,8 @@ Found a security problem? Please report it privately; see [SECURITY.md](SECURITY
 
 - **One account.** Sign-in attempts are rate limited per client address.
 - **Secrets stay on the server.** Email passwords and notification keys are stored in the data volume and never sent to the browser. Treat the volume like a `.env` file, and use app passwords so you can revoke Docket's access on its own.
-- **Read-only email.** Mailboxes are opened read-only. Email text goes only to the AI server you configured.
+- **Read-only email.** Mailboxes are opened read-only. Email text goes only to the AI server you configured. Microsoft accounts give Docket a token for IMAP only; revoke it any time at myaccount.microsoft.com → Apps.
+- **Notification buttons are signed.** `/act` and `/api/act` work without a session, but each link is an HMAC for one task at one due date, so it can't be used on anything else and goes stale once the task moves on.
 - **Email is untrusted.** The model is told to treat email as data, and its answers are checked against a fixed shape, so the most a crafted email can do is get itself misfiled or suggest a task you then decline.
 - **Use HTTPS if it's reachable from outside your network.** The container speaks plain HTTP; put it behind your reverse proxy or keep it on your LAN / VPN.
 - **Hardened container.** It runs as an unprivileged user, and this repo's compose file also runs it with a read-only filesystem and `no-new-privileges`.

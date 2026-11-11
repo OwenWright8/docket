@@ -1,9 +1,9 @@
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { CalendarCheck, Check, Mail, RefreshCw, SkipForward, Sparkles, Undo2 } from "lucide-react";
-import { api, get, type Digest, type Today } from "@/lib/api";
-import { dayLabel, longDate } from "@/lib/dates";
+import { BookOpen, CalendarCheck, CalendarDays, Check, ClipboardList, ExternalLink, GraduationCap, Hourglass, Mail, MapPin, PenLine, RefreshCw, SkipForward, Sparkles, Undo2 } from "lucide-react";
+import { api, get, type Digest, type ScheduleItem, type Today } from "@/lib/api";
+import { dayLabel, longDate, timeLabel } from "@/lib/dates";
 import { PageHeader, useStatus } from "@/components/Layout";
 import { QuickAdd, TaskList, useInvalidateTasks } from "@/components/tasks";
 import { Button, Card, EmptyState, PageSpinner, cn, timeAgo } from "@/components/ui";
@@ -21,6 +21,16 @@ export default function TodayPage() {
       <div className="space-y-6">
         <QuickAdd />
         <Briefing digest={d.digest} today={d.date} />
+        <Schedule today={d.date} schedule={d.schedule} school={d.school} />
+        {d.waiting > 0 && (
+          <Link to="/inbox?view=waiting" className="flex items-center gap-3 rounded-xl border px-4 py-3 text-sm hover:bg-muted/50">
+            <Hourglass className="h-4 w-4 shrink-0 text-warning" />
+            <span className="flex-1 font-medium">
+              {d.waiting} email{d.waiting === 1 ? "" : "s"} you sent still {d.waiting === 1 ? "has" : "have"} no reply
+            </span>
+            <span className="text-xs text-muted-foreground">See them →</span>
+          </Link>
+        )}
         {d.inbox > 0 && (
           <Link to="/inbox" className="flex items-center gap-3 rounded-xl border border-primary/30 bg-primary-soft px-4 py-3 text-sm text-primary hover:brightness-[.98]">
             <Mail className="h-4 w-4 shrink-0" />
@@ -173,6 +183,67 @@ function DoneToday({ done }: { done: Today["done"] }) {
           </li>
         ))}
       </ul>
+    </section>
+  );
+}
+
+const KIND_ICON = { event: CalendarDays, assignment: PenLine, reading: BookOpen, exam: GraduationCap, quiz: ClipboardList };
+const KIND_LABEL: Record<string, string> = { assignment: "Due", reading: "Reading", exam: "Exam", quiz: "Quiz" };
+
+/** Today's calendar and carrel items, then school work coming up (or past due) from carrel. */
+function Schedule({ today, schedule, school }: { today: string; schedule: ScheduleItem[]; school: Today["school"] }) {
+  if (!schedule.length && !school.length) return null;
+  const row = (i: ScheduleItem, showDay: boolean, overdue = false) => {
+    const Icon = KIND_ICON[i.kind] ?? CalendarDays;
+    const ongoing = i.end_date && i.date < today;
+    return (
+      <li key={`${i.source_id}-${i.id}`} className="flex items-start gap-3 px-4 py-2.5 sm:px-5">
+        <div className={cn("w-16 shrink-0 pt-0.5 text-xs font-medium tabular-nums", overdue ? "text-destructive" : "text-muted-foreground")}>
+          {showDay ? dayLabel(i.date, today) : i.time ? timeLabel(i.time) : ongoing ? "Ongoing" : i.kind === "event" ? "All day" : "Today"}
+        </div>
+        <Icon className={cn("mt-0.5 h-4 w-4 shrink-0", i.kind === "exam" || i.kind === "quiz" ? "text-warning" : "text-muted-foreground")} />
+        <div className="min-w-0 flex-1">
+          <div className="text-[15px] leading-snug">
+            {i.title}
+            {i.kind !== "event" && <span className="ml-1.5 text-xs text-muted-foreground">{KIND_LABEL[i.kind]}</span>}
+          </div>
+          <div className="mt-0.5 flex flex-wrap gap-x-3 text-xs text-muted-foreground">
+            {i.context && <span>{i.context}</span>}
+            {showDay && i.time && <span>{timeLabel(i.time)}</span>}
+            {!showDay && i.time && i.end_time && i.kind === "event" && <span>until {timeLabel(i.end_time)}</span>}
+            {i.location && (
+              <span className="inline-flex items-center gap-1">
+                <MapPin className="h-3 w-3" />
+                {i.location}
+              </span>
+            )}
+          </div>
+        </div>
+        {i.url && (
+          <a href={i.url} target="_blank" rel="noreferrer" className="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground" title="Open in carrel" aria-label="Open in carrel">
+            <ExternalLink className="h-3.5 w-3.5" />
+          </a>
+        )}
+      </li>
+    );
+  };
+  return (
+    <section>
+      <div className="mb-2 flex items-baseline justify-between px-1">
+        <h2 className="text-sm font-semibold">Schedule</h2>
+        <Link to="/settings#calendars" className="text-xs text-muted-foreground hover:text-foreground">
+          Calendars →
+        </Link>
+      </div>
+      <Card className="overflow-hidden">
+        {schedule.length > 0 ? <ul className="divide-y">{schedule.map((i) => row(i, false))}</ul> : <p className="px-5 py-4 text-sm text-muted-foreground">Nothing on the calendar today.</p>}
+        {school.length > 0 && (
+          <>
+            <div className="border-y bg-muted/40 px-5 py-1.5 text-xs font-medium text-muted-foreground">School this week</div>
+            <ul className="divide-y">{school.map((i) => row(i, true, i.overdue))}</ul>
+          </>
+        )}
+      </Card>
     </section>
   );
 }

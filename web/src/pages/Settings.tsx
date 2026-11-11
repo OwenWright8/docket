@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { Info, KeyRound } from "lucide-react";
 import { api, get, type About } from "@/lib/api";
 import { PageHeader } from "@/components/Layout";
-import { AiSection, EmailSection, NotifySection, ScheduleSection, SenderRulesSection } from "@/components/settings";
+import { AiSection, EmailSection, NotifySection, ScheduleSection, SenderRulesSection, SourcesSection, WidgetSection } from "@/components/settings";
 import { Button, Card, CardBody, CardHeader, Field, Input, timeAgo } from "@/components/ui";
 
 export default function SettingsPage() {
@@ -22,6 +22,8 @@ export default function SettingsPage() {
         <ScheduleSection />
         <EmailSection />
         <SenderRulesSection />
+        <SourcesSection />
+        <WidgetSection />
         <PasswordSection />
         <AboutSection />
       </div>

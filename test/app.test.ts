@@ -167,3 +167,21 @@ test("the daily summary is written by the AI and pushed once", async () => {
   assert.ok(d.facts.today.some((t: any) => t.title === "Feed the dart frogs"));
   assert.match(d.briefing, /Good morning/);
 });
+
+test("the page itself is never cached, so an update shows on the next load", async () => {
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "docket-web-"));
+  fs.mkdirSync(path.join(dir, "assets"));
+  fs.writeFileSync(path.join(dir, "index.html"), "<!doctype html><title>Docket</title>");
+  fs.writeFileSync(path.join(dir, "assets", "index-abc.js"), "1");
+  const { app } = await buildApp({ db: openDb(":memory:"), version: "t", repo: "x/y", updateCheck: false, webRoot: dir });
+  try {
+    for (const url of ["/", "/inbox", "/settings"]) assert.equal((await app.inject({ url })).headers["cache-control"], "no-cache", url);
+    assert.match(String((await app.inject({ url: "/assets/index-abc.js" })).headers["cache-control"]), /immutable/);
+  } finally {
+    await app.close();
+    fs.rmSync(dir, { recursive: true });
+  }
+});

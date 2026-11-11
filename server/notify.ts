@@ -9,6 +9,8 @@ export interface Push {
   url?: string;
   urlTitle?: string;
   priority?: "low" | "normal" | "high";
+  /** Buttons on the notification (ntfy shows up to three; Pushover can't, so it gets `url` instead). */
+  actions?: { label: string; url: string }[];
 }
 
 export type Sender = (settings: Settings, push: Push) => Promise<string[]>;
@@ -18,7 +20,7 @@ const clip = (s: string, n: number) => (s.length <= n ? s : s.slice(0, n - 1).tr
 export function channels(s: Settings): string[] {
   const out = [];
   if (s.pushoverToken && s.pushoverUser) out.push("Pushover");
-  if (s.ntfyUrl) out.push("ntfy");
+  if (ntfyTarget(s)) out.push("ntfy");
   return out;
 }
 
@@ -34,7 +36,7 @@ export const sendPush: Sender = async (s, push) => {
       errors.push(`Pushover: ${(err as Error).message}`);
     }
   }
-  if (s.ntfyUrl) {
+  if (ntfyTarget(s)) {
     try {
       await ntfy(s, push);
       sent.push("ntfy");
@@ -67,16 +69,45 @@ async function pushover(s: Settings, push: Push) {
   }
 }
 
+/** Where ntfy messages go: the server and topic fields, or v0.1.0's single topic address. */
+export function ntfyTarget(s: Settings): { server: string; topic: string } | null {
+  if (s.ntfyServer.trim() && s.ntfyTopic.trim()) return { server: s.ntfyServer.trim().replace(/\/+$/, ""), topic: s.ntfyTopic.trim() };
+  const m = s.ntfyUrl.trim().replace(/\/+$/, "").match(/^(https?:\/\/.+)\/([^/]+)$/);
+  return m && /^https?:\/\/[^/]+/.test(m[1]) ? { server: m[1], topic: m[2] } : null;
+}
+
 async function ntfy(s: Settings, push: Push) {
-  const url = s.ntfyUrl.trim();
-  if (!/^https?:\/\/[^/]+\/[^/]+/.test(url)) throw new Error("The ntfy address should look like https://ntfy.sh/your-topic");
-  const headers: Record<string, string> = {
-    // Headers must be ASCII: ntfy decodes RFC 2047 encoded words.
-    Title: `=?UTF-8?B?${Buffer.from(clip(push.title, 250)).toString("base64")}?=`,
-    Priority: push.priority === "high" ? "4" : push.priority === "low" ? "2" : "3",
+  const target = ntfyTarget(s);
+  if (!target) throw new Error("Set the ntfy server and topic");
+  const base = Math.min(5, Math.max(1, Math.round(s.ntfyPriority) || 3));
+  // Published as JSON to the server root: it carries UTF-8 titles and action buttons cleanly.
+  const body: Record<string, unknown> = {
+    topic: target.topic,
+    title: clip(push.title, 250),
+    message: clip(push.message, 4000),
+    priority: push.priority === "high" ? Math.min(5, base + 1) : push.priority === "low" ? Math.max(1, base - 1) : base,
   };
-  if (push.url) headers.Click = push.url;
-  if (s.ntfyToken) headers.Authorization = `Bearer ${s.ntfyToken}`;
-  const res = await fetch(url, { method: "POST", headers, body: clip(push.message, 4000), signal: AbortSignal.timeout(15_000) });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (push.url) body.click = push.url;
+  if (push.actions?.length) {
+    // "http" actions are sent by the phone itself, in the background: tapping Done doesn't open anything.
+    body.actions = push.actions.slice(0, 3).map((a) => ({ action: "http", label: a.label, url: a.url, method: "POST", clear: true }));
+  }
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (s.ntfyAuth === "basic" && s.ntfyUsername) headers.Authorization = `Basic ${Buffer.from(`${s.ntfyUsername}:${s.ntfyPassword}`).toString("base64")}`;
+  else if (s.ntfyAuth === "token" && s.ntfyToken) headers.Authorization = `Bearer ${s.ntfyToken}`;
+  else if (s.ntfyAuth === "none" && s.ntfyToken && !s.ntfyServer) headers.Authorization = `Bearer ${s.ntfyToken}`; // v0.1.0 setups
+  let res: Response;
+  try {
+    res = await fetch(target.server, { method: "POST", headers, body: JSON.stringify(body), signal: AbortSignal.timeout(15_000) });
+  } catch (err) {
+    const code = (err as Error & { cause?: { code?: string } }).cause?.code;
+    if (code === "ENOTFOUND" || code === "EAI_AGAIN") throw new Error(`Can't find ${target.server} from the Docket container (same Docker network?)`);
+    if (code === "ECONNREFUSED") throw new Error(`Nothing answered at ${target.server}`);
+    throw new Error(`Couldn't reach ${target.server}: ${(err as Error).message}`);
+  }
+  if (!res.ok) {
+    const err = (await res.json().catch(() => ({}))) as { error?: string };
+    if (res.status === 401 || res.status === 403) throw new Error(`ntfy refused: ${err.error || "check the username and password, or the token"}`);
+    throw new Error(err.error || `HTTP ${res.status}`);
+  }
 }

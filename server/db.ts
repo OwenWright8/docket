@@ -127,6 +127,94 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX activity_at ON activity (at DESC);
   `,
+  `
+  -- Nag mode, snoozing, and buttons on notifications.
+  ALTER TABLE tasks ADD COLUMN nag_minutes INTEGER NOT NULL DEFAULT 0;  -- 0: remind once
+  ALTER TABLE tasks ADD COLUMN nag_count INTEGER NOT NULL DEFAULT 0;    -- nags sent for the current due date
+  ALTER TABLE tasks ADD COLUMN last_pushed_at INTEGER;                  -- last reminder or nag
+  ALTER TABLE tasks ADD COLUMN snoozed_until INTEGER;                   -- push again at this time
+
+  -- Threading, to notice when someone answers an email you sent.
+  ALTER TABLE emails ADD COLUMN in_reply_to TEXT;
+  ALTER TABLE emails ADD COLUMN refs TEXT;                              -- space-separated Message-IDs
+
+  ALTER TABLE mail_accounts ADD COLUMN track_replies INTEGER NOT NULL DEFAULT 1;
+  ALTER TABLE mail_accounts ADD COLUMN sent_folder TEXT;
+  ALTER TABLE mail_accounts ADD COLUMN sent_uid_validity TEXT;
+  ALTER TABLE mail_accounts ADD COLUMN sent_last_uid INTEGER NOT NULL DEFAULT 0;
+
+  -- Email you sent. state: waiting (expects an answer) | answered | dismissed | none (didn't need one)
+  CREATE TABLE sent_mail (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL REFERENCES mail_accounts (id) ON DELETE CASCADE,
+    uid INTEGER NOT NULL,
+    message_id TEXT,
+    to_name TEXT,
+    to_addr TEXT,
+    subject TEXT,
+    snippet TEXT,
+    sent_at INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    reason TEXT,
+    decided_by TEXT NOT NULL,             -- ai | basic | you
+    answered_at INTEGER,
+    answer_email_id INTEGER,
+    nudged INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    UNIQUE (account_id, uid)
+  );
+  CREATE INDEX sent_mail_message ON sent_mail (message_id);
+
+  -- Calendars (iCalendar links) and carrel, read on a schedule.
+  CREATE TABLE sources (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,                   -- ics | carrel
+    name TEXT NOT NULL,
+    url TEXT NOT NULL,
+    username TEXT,
+    password TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    last_synced_at INTEGER,
+    last_error TEXT,
+    created_at INTEGER NOT NULL
+  );
+
+  -- What they hold, from a week ago to two months out; replaced on every read.
+  -- kind: event | assignment | reading | exam | quiz
+  CREATE TABLE external_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id INTEGER NOT NULL REFERENCES sources (id) ON DELETE CASCADE,
+    ext_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    title TEXT NOT NULL,
+    date TEXT NOT NULL,                   -- local "YYYY-MM-DD"
+    end_date TEXT,                        -- last day, for events over several days
+    time TEXT,                            -- local "HH:mm"; null for all-day / date-only
+    end_time TEXT,
+    location TEXT,
+    context TEXT,                         -- course code, calendar name
+    url TEXT,
+    UNIQUE (source_id, ext_id)
+  );
+  CREATE INDEX external_items_date ON external_items (date);
+
+  -- Keys for the read-only stats endpoint (Homepage's Custom API widget).
+  -- Only a hash is stored: the key is shown once, when it's created.
+  CREATE TABLE widget_keys (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    label TEXT NOT NULL,
+    key_hash TEXT NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL,
+    last_used_at INTEGER
+  );
+  `,
+  `
+  -- Accounts that sign in with Microsoft (OAuth) instead of a password.
+  ALTER TABLE mail_accounts ADD COLUMN auth TEXT NOT NULL DEFAULT 'password';  -- password | microsoft
+  ALTER TABLE mail_accounts ADD COLUMN oauth_refresh TEXT;
+  ALTER TABLE mail_accounts ADD COLUMN oauth_access TEXT;
+  ALTER TABLE mail_accounts ADD COLUMN oauth_expires INTEGER;
+  `,
 ];
 
 export function openDb(file: string): DB {
@@ -179,8 +267,17 @@ export interface Settings {
   pushoverToken: string;
   pushoverUser: string;
   pushoverDevices: string;
-  ntfyUrl: string;
+  /** ntfy server, without the topic: "https://ntfy.sh", or "http://ntfy:80" on the same Docker network. */
+  ntfyServer: string;
+  ntfyTopic: string;
+  ntfyAuth: "none" | "basic" | "token";
+  ntfyUsername: string;
+  ntfyPassword: string;
   ntfyToken: string;
+  /** 1 (min) to 5 (max). Urgent pushes (nags, high priority, email to act on) go one higher. */
+  ntfyPriority: number;
+  /** v0.1.0's single "https://ntfy.sh/topic" field; still read if the new ones are empty. */
+  ntfyUrl: string;
   /** This app's address, for "open" links in notifications. */
   publicUrl: string;
 
@@ -196,9 +293,19 @@ export interface Settings {
   mailIntervalMinutes: number;
   /** On the first check of an account, look back this many days. */
   mailLookbackDays: number;
+  /** Flag email you sent as unanswered after this many days. */
+  replyWaitDays: number;
+  /** Signs the Done / Snooze links in notifications. */
+  actionSecret: string;
+  /** Your Microsoft Entra app (for "Sign in with Microsoft" on email accounts). */
+  msClientId: string;
+  /** "common" (any account), "consumers", "organizations", or your school's tenant id or domain. */
+  msTenant: string;
 }
 
-export const SECRET_KEYS = ["aiApiKey", "pushoverToken", "pushoverUser", "ntfyToken"] as const;
+export const SECRET_KEYS = ["aiApiKey", "pushoverToken", "pushoverUser", "ntfyToken", "ntfyPassword"] as const;
+/** Never sent to the browser at all. */
+export const HIDDEN_KEYS = ["adminPasswordHash", "actionSecret"] as const;
 
 export const DEFAULT_SETTINGS: Settings = {
   adminUsername: "",
@@ -213,8 +320,14 @@ export const DEFAULT_SETTINGS: Settings = {
   pushoverToken: "",
   pushoverUser: "",
   pushoverDevices: "",
-  ntfyUrl: "",
+  ntfyServer: "",
+  ntfyTopic: "",
+  ntfyAuth: "none",
+  ntfyUsername: "",
+  ntfyPassword: "",
   ntfyToken: "",
+  ntfyPriority: 3,
+  ntfyUrl: "",
   publicUrl: "",
   remindersPush: true,
   reminderLeadMinutes: 0,
@@ -224,6 +337,10 @@ export const DEFAULT_SETTINGS: Settings = {
   emailPush: true,
   mailIntervalMinutes: 15,
   mailLookbackDays: 3,
+  replyWaitDays: 3,
+  actionSecret: "",
+  msClientId: "",
+  msTenant: "common",
 };
 
 export function getSettings(db: DB): Settings {
@@ -262,6 +379,10 @@ export interface TaskRow {
   email_id: number | null;
   done_at: number | null;
   notified_for: string | null;
+  nag_minutes: number;
+  nag_count: number;
+  last_pushed_at: number | null;
+  snoozed_until: number | null;
   created_at: number;
   updated_at: number;
 }
@@ -280,6 +401,14 @@ export interface MailAccountRow {
   last_uid: number;
   last_checked_at: number | null;
   last_error: string | null;
+  track_replies: number;
+  auth: "password" | "microsoft";
+  oauth_refresh: string | null;
+  oauth_access: string | null;
+  oauth_expires: number | null;
+  sent_folder: string | null;
+  sent_uid_validity: string | null;
+  sent_last_uid: number;
   created_at: number;
 }
 
@@ -305,7 +434,56 @@ export interface EmailRow {
   task_id: number | null;
   handled: number;
   notified: number;
+  in_reply_to: string | null;
+  refs: string | null;
   created_at: number;
+}
+
+export interface SentRow {
+  id: number;
+  account_id: number;
+  uid: number;
+  message_id: string | null;
+  to_name: string | null;
+  to_addr: string | null;
+  subject: string | null;
+  snippet: string | null;
+  sent_at: number;
+  state: "waiting" | "answered" | "dismissed" | "none";
+  reason: string | null;
+  decided_by: string;
+  answered_at: number | null;
+  answer_email_id: number | null;
+  nudged: number;
+  created_at: number;
+}
+
+export interface SourceRow {
+  id: number;
+  kind: "ics" | "carrel";
+  name: string;
+  url: string;
+  username: string | null;
+  password: string | null;
+  enabled: number;
+  last_synced_at: number | null;
+  last_error: string | null;
+  created_at: number;
+}
+
+export interface ExternalItem {
+  id: number;
+  source_id: number;
+  ext_id: string;
+  kind: "event" | "assignment" | "reading" | "exam" | "quiz";
+  title: string;
+  date: string;
+  end_date: string | null;
+  time: string | null;
+  end_time: string | null;
+  location: string | null;
+  context: string | null;
+  url: string | null;
 }
 
 export interface SenderRule {

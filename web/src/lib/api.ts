@@ -60,6 +60,8 @@ export interface Task {
   emailId: number | null;
   doneAt: number | null;
   lastDone: number | null;
+  nagMinutes: number;
+  snoozedUntil: number | null;
   createdAt: number;
 }
 
@@ -77,6 +79,7 @@ export interface ParsedTask {
   dueTime: string | null;
   recurrence: Recurrence | null;
   priority: number;
+  nagMinutes?: number;
 }
 
 export interface DayFacts {
@@ -107,6 +110,56 @@ export interface Today {
   done: { logId: number; action: string; at: number; task: Task }[];
   digest: Digest | null;
   inbox: number;
+  schedule: ScheduleItem[];
+  school: (ScheduleItem & { overdue: boolean })[];
+  waiting: number;
+}
+
+export interface ScheduleItem {
+  id: number;
+  source_id: number;
+  kind: "event" | "assignment" | "reading" | "exam" | "quiz";
+  title: string;
+  date: string;
+  end_date: string | null;
+  time: string | null;
+  end_time: string | null;
+  location: string | null;
+  context: string | null;
+  url: string | null;
+}
+
+export interface Source {
+  id: number;
+  kind: "ics" | "carrel";
+  name: string;
+  url: string;
+  username: string | null;
+  enabled: boolean;
+  lastSyncedAt: number | null;
+  lastError: string | null;
+  items: number;
+}
+
+export interface SentMail {
+  id: number;
+  toName: string | null;
+  toAddr: string | null;
+  subject: string | null;
+  snippet: string | null;
+  sentAt: number;
+  state: "waiting" | "answered" | "dismissed" | "none";
+  reason: string | null;
+  decidedBy: string;
+  answeredAt: number | null;
+  overdue: boolean;
+}
+
+export interface WidgetKey {
+  id: number;
+  label: string;
+  createdAt: number;
+  lastUsedAt: number | null;
 }
 
 export interface Status {
@@ -114,6 +167,8 @@ export interface Status {
   aiModel: string;
   due: number;
   inbox: number;
+  waiting: number;
+  sources: number;
   mailAccounts: number;
   mailBusy: boolean;
   notifications: string[];
@@ -156,6 +211,10 @@ export interface MailAccount {
   username: string;
   folder: string;
   enabled: boolean;
+  auth: "password" | "microsoft";
+  needsSignIn: boolean;
+  trackReplies: boolean;
+  sentFolder: string | null;
   lastCheckedAt: number | null;
   lastError: string | null;
   emails: number;
@@ -184,8 +243,15 @@ export interface Settings {
   pushoverUserSet: boolean;
   pushoverDevices: string;
   ntfyUrl: string;
+  ntfyServer: string;
+  ntfyTopic: string;
+  ntfyAuth: "none" | "basic" | "token";
+  ntfyUsername: string;
+  ntfyPassword: string;
+  ntfyPasswordSet: boolean;
   ntfyToken: string;
   ntfyTokenSet: boolean;
+  ntfyPriority: number;
   publicUrl: string;
   remindersPush: boolean;
   reminderLeadMinutes: number;
@@ -195,6 +261,9 @@ export interface Settings {
   emailPush: boolean;
   mailIntervalMinutes: number;
   mailLookbackDays: number;
+  replyWaitDays: number;
+  msClientId: string;
+  msTenant: string;
 }
 
 export interface About {
@@ -209,4 +278,15 @@ export interface ActivityEntry {
   at: number;
   kind: string;
   message: string;
+}
+
+export interface MicrosoftFlow {
+  id: string;
+  userCode: string;
+  verificationUri: string;
+  expiresAt: number;
+  state: "pending" | "done" | "error";
+  error?: string;
+  accountId?: number;
+  email?: string;
 }

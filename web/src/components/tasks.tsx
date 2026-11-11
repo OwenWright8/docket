@@ -2,10 +2,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { AlertCircle, ArrowRight, Bell, Check, Clock, Flag, Mail, MoreHorizontal, Pencil, Repeat, SkipForward, Sparkles, Trash2, Wand2, X } from "lucide-react";
+import { AlarmClock, AlertCircle, ArrowRight, Bell, BellRing, CalendarClock, Check, Clock, Flag, Mail, MessageCircleQuestion, MoreHorizontal, Pencil, Repeat, SkipForward, Sparkles, Trash2, Wand2, X } from "lucide-react";
 import { api, get, type ParsedTask, type Recurrence, type Task, type TaskDetail } from "@/lib/api";
 import { WEEKDAYS, dayLabel, timeLabel, ymd } from "@/lib/dates";
 import { Badge, Button, Field, Input, Modal, Segmented, Select, cn, timeAgo } from "./ui";
+
+export const nagLabel = (m: number) => (m < 60 ? `${m} min` : m === 60 ? "hour" : `${m / 60} hours`);
 
 export function useInvalidateTasks() {
   const qc = useQueryClient();
@@ -60,16 +62,40 @@ function useTaskActions() {
     },
     onError: (e: Error) => toast.error(e.message),
   });
+  const snooze = useMutation({
+    mutationFn: (t: Task) => api<Task>("POST", `/tasks/${t.id}/snooze`, { minutes: 60 }),
+    onSuccess: (_r, t) => {
+      invalidate();
+      toast(`Snoozed ${t.title} for an hour`);
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+  const tomorrow = useMutation({
+    mutationFn: (t: Task) => api<Task>("POST", `/tasks/${t.id}/tomorrow`),
+    onSuccess: (_r, t) => {
+      invalidate();
+      toast(`Moved ${t.title} to tomorrow`);
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
   const reopen = useMutation({
     mutationFn: (t: Task) => api<Task>("POST", `/tasks/${t.id}/reopen`),
     onSuccess: invalidate,
     onError: (e: Error) => toast.error(e.message),
   });
-  return { complete, skip, remove, reopen };
+  return { complete, skip, remove, reopen, snooze, tomorrow };
 }
 
 /** The chips under a task's title. */
-export function TaskMeta({ task, today, showDate = true }: { task: Pick<Task, "dueDate" | "dueTime" | "repeatText" | "list" | "priority" | "source"> & { lastDone?: number | null }; today: string; showDate?: boolean }) {
+export function TaskMeta({
+  task,
+  today,
+  showDate = true,
+}: {
+  task: Pick<Task, "dueDate" | "dueTime" | "repeatText" | "list" | "priority" | "source"> & { lastDone?: number | null; nagMinutes?: number; snoozedUntil?: number | null };
+  today: string;
+  showDate?: boolean;
+}) {
   const overdue = task.dueDate && task.dueDate < today;
   return (
     <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
@@ -97,6 +123,16 @@ export function TaskMeta({ task, today, showDate = true }: { task: Pick<Task, "d
           <Flag className="h-3 w-3" /> High
         </span>
       )}
+      {!!task.nagMinutes && (
+        <span className="inline-flex items-center gap-1 font-medium text-warning" title={`Reminds you every ${nagLabel(task.nagMinutes)} until it's done`}>
+          <BellRing className="h-3 w-3" /> Nags
+        </span>
+      )}
+      {task.snoozedUntil && (
+        <span className="inline-flex items-center gap-1">
+          <AlarmClock className="h-3 w-3" /> Snoozed till {new Date(task.snoozedUntil).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}
+        </span>
+      )}
       {task.source === "email" && (
         <span className="inline-flex items-center gap-1">
           <Mail className="h-3 w-3" /> From email
@@ -108,7 +144,7 @@ export function TaskMeta({ task, today, showDate = true }: { task: Pick<Task, "d
 }
 
 export function TaskItem({ task, today, showDate = true }: { task: Task; today: string; showDate?: boolean }) {
-  const { complete, skip, remove, reopen } = useTaskActions();
+  const { complete, skip, remove, reopen, snooze, tomorrow } = useTaskActions();
   const [editing, setEditing] = useState(false);
   const [menu, setMenu] = useState(false);
   const done = !!task.doneAt;
@@ -149,6 +185,18 @@ export function TaskItem({ task, today, showDate = true }: { task: Task; today: 
                 <MenuItem icon={SkipForward} onClick={() => (setMenu(false), skip.mutate(task))}>
                   Skip this time
                 </MenuItem>
+              )}
+              {!done && task.dueDate && task.dueDate <= today && (
+                <>
+                  {(task.dueTime || task.nagMinutes > 0) && (
+                    <MenuItem icon={AlarmClock} onClick={() => (setMenu(false), snooze.mutate(task))}>
+                      Snooze 1 hour
+                    </MenuItem>
+                  )}
+                  <MenuItem icon={CalendarClock} onClick={() => (setMenu(false), tomorrow.mutate(task))}>
+                    Move to tomorrow
+                  </MenuItem>
+                </>
               )}
               <MenuItem icon={Trash2} danger onClick={() => (setMenu(false), remove.mutate(task))}>
                 Delete
@@ -191,6 +239,7 @@ type Draft = {
   dueTime: string;
   recurrence: Recurrence | null;
   priority: number;
+  nagMinutes: number;
 };
 
 const toDraft = (t?: Partial<ParsedTask>): Draft => ({
@@ -201,6 +250,7 @@ const toDraft = (t?: Partial<ParsedTask>): Draft => ({
   dueTime: t?.dueTime ?? "",
   recurrence: t?.recurrence ?? null,
   priority: t?.priority ?? 1,
+  nagMinutes: t?.nagMinutes ?? 0,
 });
 
 const fromDraft = (d: Draft): ParsedTask => ({
@@ -211,6 +261,7 @@ const fromDraft = (d: Draft): ParsedTask => ({
   dueTime: d.dueDate && d.dueTime ? d.dueTime : null,
   recurrence: d.recurrence,
   priority: d.priority,
+  nagMinutes: d.nagMinutes,
 });
 
 /**
@@ -309,6 +360,24 @@ export function TaskEditor({
             />
           </Field>
         </div>
+        <Field
+          label="Nag me"
+          htmlFor="t-nag"
+          hint={
+            d.nagMinutes
+              ? `After ${d.dueTime ? "its time" : "your summary time"}, it pushes again every ${nagLabel(d.nagMinutes)} until it's done or snoozed (quiet 10 PM–7 AM).`
+              : "For things you can't let slide, like feeding or meds."
+          }
+        >
+          <Select id="t-nag" value={d.nagMinutes} onChange={(e) => set("nagMinutes", Number(e.target.value))}>
+            <option value={0}>No, remind me once</option>
+            {[10, 15, 30, 60, 120].map((m) => (
+              <option key={m} value={m}>
+                Every {nagLabel(m)} until it's done
+              </option>
+            ))}
+          </Select>
+        </Field>
         <Field label="Notes" htmlFor="t-notes">
           <textarea
             id="t-notes"
@@ -429,6 +498,7 @@ const EXAMPLES = [
   "Dentist Friday at 3pm",
   "Pay rent on the 1st every month",
   "Water plants Mondays and Thursdays",
+  "When did I last feed the gecko?",
 ];
 
 export function QuickAdd() {
@@ -446,11 +516,24 @@ export function QuickAdd() {
     el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
   }, [text]);
 
+  const [answer, setAnswer] = useState<{ question: string; answer: string } | null>(null);
   const parse = useMutation({
     mutationFn: () => api<{ tasks: ParsedTask[]; via: string; note?: string }>("POST", "/parse", { text }),
     onSuccess: (r) => setPreview(r),
     onError: (e: Error) => toast.error(e.message),
   });
+  const ask = useMutation({
+    mutationFn: (question: string) => api<{ answer: string }>("POST", "/ask", { question }),
+    onSuccess: (r, question) => setAnswer({ question, answer: r.answer }),
+    onError: (e: Error) => toast.error(e.message),
+  });
+  /** A question ("when did I last feed the gecko?") is asked; anything else becomes tasks. */
+  const go = () => {
+    const t = text.trim();
+    if (!t) return;
+    if (t.endsWith("?")) ask.mutate(t);
+    else parse.mutate();
+  };
   const add = useMutation({
     mutationFn: () => api<Task[]>("POST", "/tasks/bulk", { tasks: preview!.tasks, source: preview!.via === "ai" ? "ai" : "manual" }),
     onSuccess: (r) => {
@@ -469,7 +552,7 @@ export function QuickAdd() {
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          if (text.trim()) parse.mutate();
+          go();
         }}
         className="flex items-end gap-2 rounded-xl border bg-card p-2 pl-4 shadow-sm focus-within:ring-2 focus-within:ring-ring"
       >
@@ -482,16 +565,16 @@ export function QuickAdd() {
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
-              if (text.trim()) parse.mutate();
+              go();
             }
           }}
           placeholder={placeholder}
           aria-label="Add a task in your own words"
           className="min-h-[40px] flex-1 resize-none bg-transparent py-2 text-[15px] outline-none placeholder:text-muted-foreground/70 focus-visible:ring-0 focus-visible:ring-offset-0"
         />
-        <Button type="submit" loading={parse.isPending} disabled={!text.trim()}>
-          {!parse.isPending && <ArrowRight className="h-4 w-4" />}
-          <span className="hidden sm:inline">Add</span>
+        <Button type="submit" loading={parse.isPending || ask.isPending} disabled={!text.trim()}>
+          {!parse.isPending && !ask.isPending && (text.trim().endsWith("?") ? <MessageCircleQuestion className="h-4 w-4" /> : <ArrowRight className="h-4 w-4" />)}
+          <span className="hidden sm:inline">{text.trim().endsWith("?") ? "Ask" : "Add"}</span>
         </Button>
       </form>
 
@@ -541,6 +624,39 @@ export function QuickAdd() {
           ))}
         </ul>
         {!tasks.length && <p className="py-6 text-center text-sm text-muted-foreground">Nothing left to add.</p>}
+      </Modal>
+      <Modal
+        open={!!answer}
+        onClose={() => setAnswer(null)}
+        title={answer?.question ?? ""}
+        description={
+          <span className="inline-flex items-center gap-1.5">
+            <Wand2 className="h-3.5 w-3.5" /> Answered by your local AI from your tasks, history, calendar and email.
+          </span>
+        }
+        footer={
+          <>
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setAnswer(null);
+                parse.mutate();
+              }}
+            >
+              It was a task, add it
+            </Button>
+            <Button
+              onClick={() => {
+                setAnswer(null);
+                setText("");
+              }}
+            >
+              Thanks
+            </Button>
+          </>
+        }
+      >
+        <p className="whitespace-pre-line pb-2 text-[15px] leading-relaxed">{answer?.answer}</p>
       </Modal>
       {editing !== null && preview && (
         <TaskEditor

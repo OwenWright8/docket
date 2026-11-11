@@ -1,18 +1,19 @@
 import { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Ban, Check, CheckCheck, ExternalLink, Inbox as InboxIcon, ListPlus, Mail, MoreHorizontal, RefreshCw, Search, Star, X } from "lucide-react";
-import { api, get, type Category, type Email, type EmailList, type ParsedTask, type Status } from "@/lib/api";
+import { Ban, Check, CheckCheck, Hourglass, MailCheck, ExternalLink, Inbox as InboxIcon, ListPlus, Mail, MoreHorizontal, RefreshCw, Search, Star, X } from "lucide-react";
+import { api, get, type Category, type Email, type EmailList, type ParsedTask, type SentMail, type Status } from "@/lib/api";
 import { dayLabel, timeLabel, ymd } from "@/lib/dates";
 import { PageHeader } from "@/components/Layout";
 import { TaskEditor, useInvalidateTasks } from "@/components/tasks";
 import { Badge, Button, Card, EmptyState, Input, PageSpinner, cn, timeAgo } from "@/components/ui";
 
-type View = "attention" | "other" | "filtered" | "handled";
+type View = "attention" | "waiting" | "other" | "filtered" | "handled";
 
 const VIEWS: { value: View; label: string; hint: string }[] = [
   { value: "attention", label: "Needs you", hint: "Important email and anything you need to do something about." },
+  { value: "waiting", label: "Waiting on", hint: "Email you sent that asked for something and hasn't had an answer. It leaves this list by itself when the reply arrives." },
   { value: "other", label: "FYI", hint: "Receipts, shipping updates and other routine mail. Nothing to do." },
   { value: "filtered", label: "Filtered", hint: "Promotions, newsletters, spam and senders you ignore. Check now and then for anything misfiled." },
   { value: "handled", label: "Dealt with", hint: "Email you've cleared." },
@@ -31,17 +32,22 @@ export function useInvalidateEmails() {
   const qc = useQueryClient();
   return () => {
     qc.invalidateQueries({ queryKey: ["emails"] });
+    qc.invalidateQueries({ queryKey: ["sent"] });
     qc.invalidateQueries({ queryKey: ["status"] });
     qc.invalidateQueries({ queryKey: ["today"] });
   };
 }
 
 export default function InboxPage() {
-  const [view, setView] = useState<View>("attention");
+  const [params, setParams] = useSearchParams();
+  const view = (VIEWS.some((v) => v.value === params.get("view")) ? params.get("view") : "attention") as View;
+  const setView = (v: View) => setParams(v === "attention" ? {} : { view: v }, { replace: true });
   const [q, setQ] = useState("");
   const invalidate = useInvalidateEmails();
   const status = useQuery({ queryKey: ["status"], queryFn: () => get<Status>("/status") }).data;
+  const sent = useQuery({ queryKey: ["sent"], queryFn: () => get<SentMail[]>("/sent"), refetchInterval: 60_000 });
   const list = useQuery({
+    enabled: view !== "waiting",
     queryKey: ["emails", view, q],
     queryFn: () => get<EmailList>(`/emails?view=${view}${q.trim() ? `&q=${encodeURIComponent(q.trim())}` : ""}`),
     placeholderData: (p) => p,
@@ -101,7 +107,7 @@ export default function InboxPage() {
       />
       <div className="scrollbar-none -mx-4 mb-3 flex gap-1 overflow-x-auto border-b px-4 sm:mx-0 sm:px-0">
         {VIEWS.map((v) => {
-          const n = counts?.[v.value] ?? 0;
+          const n = v.value === "waiting" ? (sent.data?.filter((x) => x.overdue).length ?? 0) : (counts?.[v.value as keyof EmailList["counts"]] ?? 0);
           return (
             <button
               key={v.value}
@@ -125,7 +131,9 @@ export default function InboxPage() {
         </div>
       </div>
 
-      {!data ? (
+      {view === "waiting" ? (
+        <WaitingList items={(sent.data ?? []).filter((x) => !q.trim() || `${x.toName} ${x.toAddr} ${x.subject}`.toLowerCase().includes(q.trim().toLowerCase()))} loading={sent.isLoading} />
+      ) : !data ? (
         <PageSpinner />
       ) : !data.emails.length ? (
         <EmptyState icon={<InboxIcon className="h-5 w-5" />} title={view === "attention" ? "You're all caught up" : "Nothing here"}>
@@ -304,5 +312,72 @@ function EmailCard({ email: e }: { email: Email }) {
         />
       )}
     </Card>
+  );
+}
+
+function WaitingList({ items, loading }: { items: SentMail[]; loading: boolean }) {
+  const invalidate = useInvalidateEmails();
+  const invalidateTasks = useInvalidateTasks();
+  const setState = useMutation({
+    mutationFn: ({ id, state }: { id: number; state: string }) => api("PATCH", `/sent/${id}`, { state }),
+    onSuccess: invalidate,
+    onError: (e: Error) => toast.error(e.message),
+  });
+  const followUp = useMutation({
+    mutationFn: (id: number) => api("POST", `/sent/${id}/follow-up`),
+    onSuccess: () => {
+      invalidate();
+      invalidateTasks();
+      toast.success("Added a follow-up task for today");
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+  if (loading) return <PageSpinner />;
+  if (!items.length)
+    return (
+      <EmptyState icon={<MailCheck className="h-5 w-5" />} title="Nobody owes you a reply">
+        When you send an email that asks for something, it waits here until the answer comes in. Turn this on per account under Settings → Email.
+      </EmptyState>
+    );
+  return (
+    <div className="space-y-3">
+      {items.map((w) => {
+        const days = Math.floor((Date.now() - w.sentAt) / 86_400_000);
+        return (
+          <Card key={w.id} className="p-4 sm:p-5">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <span className="text-sm text-muted-foreground">To</span>
+              <span className="font-medium">{w.toName || w.toAddr}</span>
+              {w.overdue ? (
+                <Badge tone="warning">
+                  <Hourglass className="h-3 w-3" /> {days} day{days === 1 ? "" : "s"}, no reply
+                </Badge>
+              ) : (
+                <span className="text-xs text-muted-foreground">sent {timeAgo(w.sentAt)}</span>
+              )}
+            </div>
+            <div className="mt-0.5 text-[15px] font-semibold leading-snug">{w.subject}</div>
+            {w.snippet && <p className="mt-1.5 line-clamp-2 text-sm text-muted-foreground">{w.snippet}</p>}
+            {w.reason && (
+              <p className="mt-2 text-xs text-muted-foreground/90">
+                {w.decidedBy === "ai" ? "AI: " : w.decidedBy === "basic" ? "Basic check: " : ""}
+                {w.reason}
+              </p>
+            )}
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button size="sm" variant="outline" onClick={() => followUp.mutate(w.id)}>
+                <ListPlus className="h-4 w-4" /> Follow-up task
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => setState.mutate({ id: w.id, state: "answered" })}>
+                <Check className="h-4 w-4" /> They replied
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => setState.mutate({ id: w.id, state: "dismissed" })}>
+                Stop waiting
+              </Button>
+            </div>
+          </Card>
+        );
+      })}
+    </div>
   );
 }

@@ -10,6 +10,7 @@ import {
   type EmailRow,
   type MailAccountRow,
   type Settings,
+  HIDDEN_KEYS,
   SECRET_KEYS,
   errorText,
   getSettings,
@@ -30,6 +31,9 @@ import { Engine, type EngineDeps } from "./engine.ts";
 import { channels } from "./notify.ts";
 import { parseQuickAdd } from "./parse.ts";
 import { latestDigest } from "./summary.ts";
+import { registerExtras } from "./routes-extra.ts";
+import { MS_IMAP_HOST, MicrosoftSignIn, freshAccount } from "./microsoft.ts";
+import { itemsBetween, itemsOn, overdueSchool } from "./sources.ts";
 import {
   completeTask,
   createTask,
@@ -72,7 +76,8 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     reply.setCookie(SESSION_COOKIE, token, { path: "/", httpOnly: true, sameSite: "lax", secure: req.protocol === "https", maxAge });
   };
 
-  const PUBLIC = new Set(["/api/health", "/api/session", "/api/login", "/api/account/create"]);
+  // /api/act is signed per task, /api/widget checks its own key.
+  const PUBLIC = new Set(["/api/health", "/api/session", "/api/login", "/api/account/create", "/api/act", "/api/widget"]);
   app.addHook("onRequest", async (req, reply) => {
     const url = req.url.split("?")[0];
     if (!url.startsWith("/api/") || PUBLIC.has(url)) return;
@@ -146,6 +151,8 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
 
   // --- Status (sidebar badges, AI dot) ---------------------------------------------
 
+  const waitingCount = () =>
+    (db.prepare("SELECT count(*) AS n FROM sent_mail WHERE state = 'waiting' AND sent_at < ?").get(now().getTime() - getSettings(db).replyWaitDays * 86_400_000) as { n: number }).n;
   const attentionCount = () =>
     (db.prepare(`SELECT count(*) AS n FROM emails WHERE handled = 0 AND category IN ('important','action')`).get() as { n: number }).n;
 
@@ -160,6 +167,8 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
       aiModel: s.aiProvider !== "none" ? s.aiModel : "",
       due,
       inbox: attentionCount(),
+      waiting: waitingCount(),
+      sources: (db.prepare("SELECT count(*) AS n FROM sources").get() as { n: number }).n,
       mailAccounts: accounts,
       mailBusy: engine.mailBusy,
       notifications: channels(s),
@@ -189,6 +198,12 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
       done: doneToday.map((r) => ({ logId: r.log_id, action: r.action, at: r.at, task: publicTask(r) })),
       digest: latestDigest(db),
       inbox: attentionCount(),
+      schedule: itemsOn(db, today),
+      school: [
+        ...overdueSchool(db, today).map((i) => ({ ...i, overdue: true })),
+        ...itemsBetween(db, addDays(today, 1), week, ["assignment", "reading", "exam", "quiz"]).map((i) => ({ ...i, overdue: false })),
+      ],
+      waiting: waitingCount(),
     };
   });
 
@@ -459,6 +474,10 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     username: a.username,
     folder: a.folder,
     enabled: !!a.enabled,
+    auth: a.auth,
+    needsSignIn: a.auth === "microsoft" && !a.oauth_refresh,
+    trackReplies: !!a.track_replies,
+    sentFolder: a.sent_folder,
     lastCheckedAt: a.last_checked_at,
     lastError: a.last_error,
     emails: (db.prepare("SELECT count(*) AS n FROM emails WHERE account_id = ?").get(a.id) as { n: number }).n,
@@ -473,16 +492,18 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     password?: string;
     folder?: string;
     enabled?: boolean;
+    trackReplies?: boolean;
   }
 
   function cleanAccount(b: AccountBody, existing?: MailAccountRow) {
     const host = String(b.host ?? existing?.host ?? "").trim().toLowerCase();
     const username = String(b.username ?? existing?.username ?? "").trim();
     const password = b.password ? String(b.password) : (existing?.password ?? "");
+    const oauth = existing?.auth === "microsoft";
     const port = Number(b.port ?? existing?.port ?? 993);
     if (!host) return { error: "Enter the IMAP server (e.g. imap.gmail.com)" };
     if (!username) return { error: "Enter the username (usually your email address)" };
-    if (!password) return { error: "Enter the password (an app password for Gmail, iCloud and Outlook)" };
+    if (!password && !oauth) return { error: "Enter the password (an app password for Gmail and iCloud), or use Sign in with Microsoft for Outlook and school accounts" };
     if (!Number.isInteger(port) || port < 1 || port > 65535) return { error: "That port doesn't look right" };
     return {
       label: String(b.label ?? existing?.label ?? "").trim().slice(0, 60) || username,
@@ -493,6 +514,7 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
       password,
       folder: String(b.folder ?? existing?.folder ?? "INBOX").trim() || "INBOX",
       enabled: (b.enabled ?? (existing ? !!existing.enabled : true)) ? 1 : 0,
+      track_replies: (b.trackReplies ?? (existing ? !!existing.track_replies : true)) ? 1 : 0,
     };
   }
 
@@ -505,7 +527,8 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     const a = cleanAccount(req.body ?? {}, existing);
     if ("error" in a) return reply.code(400).send({ error: a.error });
     try {
-      const r = await engine.mail.test(a);
+      const login = existing?.auth === "microsoft" ? { ...(await freshAccount(db, existing, engine.microsoftBase)), folder: a.folder } : a;
+      const r = await engine.mail.test(login);
       return { ok: true, messages: r.messages };
     } catch (err) {
       return reply.code(400).send({ error: errorText(err) });
@@ -516,8 +539,8 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     const a = cleanAccount(req.body ?? {});
     if ("error" in a) return reply.code(400).send({ error: a.error });
     const res = db
-      .prepare("INSERT INTO mail_accounts (label, host, port, secure, username, password, folder, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .run(a.label, a.host, a.port, a.secure, a.username, a.password, a.folder, a.enabled, Date.now());
+      .prepare("INSERT INTO mail_accounts (label, host, port, secure, username, password, folder, enabled, track_replies, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(a.label, a.host, a.port, a.secure, a.username, a.password, a.folder, a.enabled, a.track_replies, Date.now());
     const id = Number(res.lastInsertRowid);
     void engine.checkMail(id);
     return publicAccount(getAccount(id)!);
@@ -528,11 +551,17 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     if (!existing) return reply.code(404).send({ error: "That account is gone" });
     const a = cleanAccount(req.body ?? {}, existing);
     if ("error" in a) return reply.code(400).send({ error: a.error });
+    if (existing.auth === "microsoft") {
+      // Address and sign-in come from Microsoft; only the name, folder and switches can change.
+      a.host = existing.host;
+      a.username = existing.username;
+    }
     const moved = a.host !== existing.host || a.username !== existing.username || a.folder !== existing.folder;
     db.prepare(
-      `UPDATE mail_accounts SET label = ?, host = ?, port = ?, secure = ?, username = ?, password = ?, folder = ?, enabled = ?,
-         uid_validity = CASE WHEN ? THEN NULL ELSE uid_validity END, last_uid = CASE WHEN ? THEN 0 ELSE last_uid END, last_error = NULL WHERE id = ?`,
-    ).run(a.label, a.host, a.port, a.secure, a.username, a.password, a.folder, a.enabled, moved ? 1 : 0, moved ? 1 : 0, existing.id);
+      `UPDATE mail_accounts SET label = ?, host = ?, port = ?, secure = ?, username = ?, password = ?, folder = ?, enabled = ?, track_replies = ?,
+         uid_validity = CASE WHEN ? THEN NULL ELSE uid_validity END, last_uid = CASE WHEN ? THEN 0 ELSE last_uid END,
+         sent_folder = CASE WHEN ? THEN NULL ELSE sent_folder END, sent_last_uid = CASE WHEN ? THEN 0 ELSE sent_last_uid END, last_error = NULL WHERE id = ?`,
+    ).run(a.label, a.host, a.port, a.secure, a.username, a.password, a.folder, a.enabled, a.track_replies, moved ? 1 : 0, moved ? 1 : 0, moved ? 1 : 0, moved ? 1 : 0, existing.id);
     return publicAccount(getAccount(existing.id)!);
   });
 
@@ -562,7 +591,7 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
 
   const publicSettings = (s: Settings) => {
     const out: Record<string, unknown> = { ...s };
-    delete out.adminPasswordHash;
+    for (const k of HIDDEN_KEYS) delete out[k];
     for (const k of SECRET_KEYS) {
       out[`${k}Set`] = !!s[k];
       out[k] = "";
@@ -595,6 +624,22 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     str("aboutMe", 1000);
     str("pushoverDevices", 200);
     str("ntfyUrl");
+    str("ntfyServer");
+    str("ntfyTopic", 64);
+    str("ntfyUsername", 100);
+    str("msTenant", 100);
+    if (typeof b.msClientId === "string") {
+      const id = b.msClientId.trim();
+      if (id && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+        return reply.code(400).send({ error: "The Application (client) ID looks like 1b2c3d4e-…: copy it from the app's Overview page" });
+      }
+      patch.msClientId = id;
+    }
+    if (b.ntfyAuth !== undefined) {
+      if (!["none", "basic", "token"].includes(String(b.ntfyAuth))) return reply.code(400).send({ error: "Unknown ntfy sign-in type" });
+      patch.ntfyAuth = b.ntfyAuth as Settings["ntfyAuth"];
+    }
+    int("ntfyPriority", 1, 5);
     str("publicUrl");
     // Secrets: only replaced when a new value is sent; "clear" removes one.
     for (const k of SECRET_KEYS) {
@@ -605,12 +650,20 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     int("reminderLeadMinutes", 0, 240);
     int("mailIntervalMinutes", 5, 1440);
     int("mailLookbackDays", 1, 30);
+    int("replyWaitDays", 1, 30);
     for (const k of ["remindersPush", "summaryEnabled", "summaryPush", "emailPush", "setupComplete"] as const) bool(k);
     if (b.summaryTime !== undefined) {
       if (!isHm(b.summaryTime)) return reply.code(400).send({ error: "Pick a time for the summary" });
       patch.summaryTime = b.summaryTime as string;
     }
     if (patch.ntfyUrl && !/^https?:\/\/[^/]+\/[^/]+/.test(patch.ntfyUrl)) return reply.code(400).send({ error: "The ntfy address should look like https://ntfy.sh/your-topic" });
+    if (patch.ntfyServer) {
+      if (!/^https?:\/\/[^/\s]+/.test(patch.ntfyServer)) return reply.code(400).send({ error: "The ntfy server should start with http:// or https://, like http://ntfy:80" });
+      patch.ntfyServer = patch.ntfyServer.replace(/\/+$/, "");
+    }
+    if (patch.ntfyTopic && !/^[-_A-Za-z0-9]{1,64}$/.test(patch.ntfyTopic)) return reply.code(400).send({ error: "A topic is letters, numbers, - and _ only" });
+    // Moving to the separate fields retires the old single address.
+    if (patch.ntfyServer && patch.ntfyTopic) patch.ntfyUrl = "";
     if (patch.publicUrl && !/^https?:\/\//.test(patch.publicUrl)) return reply.code(400).send({ error: "The app's address should start with http:// or https://" });
     saveSettings(db, patch);
     return publicSettings(getSettings(db));
@@ -664,12 +717,68 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
 
   // --- Static frontend -------------------------------------------------------------------
 
+  await registerExtras(app, db, engine);
+
+  // --- Sign in with Microsoft (email) ------------------------------------------------------
+  const microsoft = new MicrosoftSignIn(
+    db,
+    (r) => {
+      const existing = r.accountId
+        ? (db.prepare("SELECT * FROM mail_accounts WHERE id = ?").get(r.accountId) as unknown as MailAccountRow | undefined)
+        : (db.prepare("SELECT * FROM mail_accounts WHERE auth = 'microsoft' AND lower(username) = ?").get(r.email) as unknown as MailAccountRow | undefined);
+      if (existing) {
+        if (existing.username.toLowerCase() !== r.email) throw new Error(`That was ${r.email}, but this account is ${existing.username}. Sign in as ${existing.username}.`);
+        db.prepare("UPDATE mail_accounts SET oauth_refresh = ?, oauth_access = ?, oauth_expires = ?, last_error = NULL WHERE id = ?").run(r.refresh, r.access, r.expiresAt, existing.id);
+        void engine.checkMail(existing.id);
+        return existing.id;
+      }
+      const res = db
+        .prepare(
+          `INSERT INTO mail_accounts (label, host, port, secure, username, password, folder, enabled, track_replies, auth, oauth_refresh, oauth_access, oauth_expires, created_at)
+           VALUES (?, ?, 993, 1, ?, '', 'INBOX', 1, 1, 'microsoft', ?, ?, ?, ?)`,
+        )
+        .run(r.email.endsWith("@outlook.com") || r.email.endsWith("@hotmail.com") || r.email.endsWith("@live.com") ? "Outlook" : r.email.split("@")[1], MS_IMAP_HOST, r.email, r.refresh, r.access, r.expiresAt, Date.now());
+      const id = Number(res.lastInsertRowid);
+      void engine.checkMail(id);
+      return id;
+    },
+    opts.microsoftBase,
+  );
+
+  app.post<{ Body: { accountId?: number } }>("/api/microsoft/sign-in", async (req, reply) => {
+    try {
+      const f = await microsoft.start({ accountId: req.body?.accountId ? Number(req.body.accountId) : undefined });
+      return f;
+    } catch (err) {
+      return reply.code(400).send({ error: errorText(err) });
+    }
+  });
+  app.get<{ Params: { id: string } }>("/api/microsoft/sign-in/:id", async (req, reply) => {
+    const f = microsoft.flows.get(req.params.id);
+    if (!f) return reply.code(404).send({ error: "That sign-in has expired. Start again." });
+    return f;
+  });
+
   const webRoot = opts.webRoot;
   if (webRoot && fs.existsSync(path.join(webRoot, "index.html"))) {
-    await app.register(fastifyStatic, { root: webRoot, wildcard: false, maxAge: "1h" });
+    // index.html is never cached, so an update shows up on the next load; the
+    // hashed files under /assets/ can be kept for good.
+    await app.register(fastifyStatic, {
+      root: webRoot,
+      wildcard: false,
+      index: false,
+      cacheControl: false, // set per file below
+      setHeaders: (res, file) => {
+        res.setHeader(
+          "Cache-Control",
+          file.endsWith("index.html") ? "no-cache" : file.includes(`${path.sep}assets${path.sep}`) ? "public, max-age=31536000, immutable" : "public, max-age=3600",
+        );
+      },
+    });
+    app.get("/", (_req, reply) => reply.sendFile("index.html"));
     app.setNotFoundHandler((req, reply) => {
       if (req.url.startsWith("/api/")) return reply.code(404).send({ error: "Not found" });
-      return reply.header("Cache-Control", "no-cache").sendFile("index.html");
+      return reply.sendFile("index.html");
     });
   }
 
