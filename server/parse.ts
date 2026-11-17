@@ -59,7 +59,9 @@ function escapeRe(s: string) {
 export function parseQuickAdd(text: string, opts: { now?: Date; lists?: string[] } = {}): ParsedTask[] {
   const now = opts.now ?? new Date();
   const out: ParsedTask[] = [];
-  for (const line of text.split(/\n|;|\.\s+(?=[A-Z])/).map((l) => l.trim()).filter(Boolean)) {
+  // A full stop before a capital starts a new task, unless it ends a title like "Prof." or "Dr.".
+  const SENTENCE = /\n|;|(?<!\b(?:Dr|Prof|Mr|Mrs|Ms|Mx|St|Sr|Jr|Mt|Ave|Rd|Blvd|Apt|Dept|vs|No))\.\s+(?=[A-Z])/;
+  for (const line of text.split(SENTENCE).map((l) => l.trim()).filter(Boolean)) {
     // "I feed the frogs every other day and I feed the gecko every other day"
     // is two tasks: split on "and" when every half has a schedule of its own.
     const halves = line.split(new RegExp(`\\s*,?\\s+(?:and|&)\\s+(?:also\\s+)?(?!${DAY_RE}s?\\b)(?=\\S)`, "i"));
@@ -176,17 +178,17 @@ export function parseOne(input: string, now: Date = new Date(), lists: string[] 
   take(/\snext\s+week\b/i, () => (dueDate = addDays(today, 7 - weekday(today) + 1)));
   take(/\s(?:this\s+)?weekend\b/i, () => (dueDate = addDays(today, (6 - weekday(today) + 7) % 7)));
   take(/\s(\d{4}-\d{2}-\d{2})\b/, (m) => isYmd(m[1]) && (dueDate = m[1]));
-  take(new RegExp(`\\s(?:on\\s+|by\\s+)?(${MONTH_RE})\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?(?:,?\\s+(\\d{4}))?\\b`, "i"), (m) => {
+  take(new RegExp(`\\s(?:on\\s+|by\\s+|before\\s+)?(${MONTH_RE})\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?(?:,?\\s+(\\d{4}))?\\b`, "i"), (m) => {
     dueDate = monthDay(MONTH_NAMES[m[1].toLowerCase()], Number(m[2]), today, m[3] ? Number(m[3]) : undefined);
   });
-  take(new RegExp(`\\s(?:on\\s+|by\\s+)?(?:the\\s+)?(\\d{1,2})(?:st|nd|rd|th)?\\s+(?:of\\s+)?(${MONTH_RE})\\b`, "i"), (m) => {
+  take(new RegExp(`\\s(?:on\\s+|by\\s+|before\\s+)?(?:the\\s+)?(\\d{1,2})(?:st|nd|rd|th)?\\s+(?:of\\s+)?(${MONTH_RE})\\b`, "i"), (m) => {
     dueDate = monthDay(MONTH_NAMES[m[2].toLowerCase()], Number(m[1]), today);
   });
-  take(/\s(?:on\s+|by\s+)?(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/, (m) => {
+  take(/\s(?:on\s+|by\s+|before\s+)?(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/, (m) => {
     const year = m[3] ? (m[3].length === 2 ? 2000 + Number(m[3]) : Number(m[3])) : undefined;
     dueDate = monthDay(Number(m[1]), Number(m[2]), today, year);
   });
-  take(new RegExp(`\\s(?:on\\s+|by\\s+|this\\s+|(next)\\s+)?(${DAY_RE})\\b`, "i"), (m) => {
+  take(new RegExp(`\\s(?:on\\s+|by\\s+|before\\s+|this\\s+|(next)\\s+)?(${DAY_RE})\\b`, "i"), (m) => {
     const target = DAY_NAMES[m[2].toLowerCase()];
     let diff = (target - weekday(today) + 7) % 7;
     if (m[1]) diff += diff === 0 ? 7 : 7;
@@ -228,8 +230,8 @@ export function cleanTitle(raw: string): string {
     /^(?:(?:please|pls|hey|ok|okay|so|also|and)\s+)*(?:remind me to|remind me|remember to|don'?t forget to|make sure (?:i|to)|i need to|i have to|i(?:'ve| have) got to|i gotta|i should|i must|i want to|i'd like to|i'll|i will|need to|have to|gotta|to|i)\s+/i;
   for (let i = 0; i < 3; i++) t = t.replace(lead, "");
   t = t
-    .replace(/\s+(?:on|at|by|in|from|starting|every|each|the|and|&|,)$/i, "")
-    .replace(/\s+(?:on|at|by|in|from|starting|every|each|the|and|&|,)$/i, "")
+    .replace(/\s+(?:on|at|by|before|in|from|starting|every|each|the|and|&|,)$/i, "")
+    .replace(/\s+(?:on|at|by|before|in|from|starting|every|each|the|and|&|,)$/i, "")
     .replace(/^[,.;:\-–\s]+|[,.;:\-–\s]+$/g, "")
     .trim();
   return t ? t[0].toUpperCase() + t.slice(1) : "";

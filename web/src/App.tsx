@@ -10,6 +10,7 @@ import TodayPage from "@/pages/Today";
 import TasksPage from "@/pages/Tasks";
 import InboxPage from "@/pages/Inbox";
 import ActivityPage from "@/pages/Activity";
+import AssistantPage from "@/pages/Assistant";
 import SettingsPage from "@/pages/Settings";
 
 export default function App() {
@@ -39,6 +40,7 @@ export default function App() {
       <Route element={<Layout onSignOut={signOut} />}>
         <Route index element={<TodayPage />} />
         <Route path="tasks" element={<TasksPage />} />
+        <Route path="assistant" element={<AssistantPage />} />
         <Route path="inbox" element={<InboxPage />} />
         <Route path="activity" element={<ActivityPage />} />
         <Route path="settings" element={<SettingsPage />} />
