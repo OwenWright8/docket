@@ -16,6 +16,8 @@ export interface FakeOllama {
   calls: { kind: string; user: string }[];
   /** While true, every chat request fails with a 500 (the model "crashed"). */
   down: boolean;
+  /** The next this many chat replies come back empty, like a small model that sometimes sends nothing. */
+  emptyNext?: number;
   close(): Promise<void>;
 }
 
@@ -31,13 +33,18 @@ export async function startFakeOllama(port = 0): Promise<FakeOllama> {
     if (req.url === "/api/tags") return send(200, { models: [{ name: "llama3.1:8b" }, { name: "qwen2.5:7b" }] });
     if (req.url !== "/api/chat") return send(404, { error: "not found" });
     if (state.down) return send(500, { error: "model crashed" });
+    if (state.emptyNext) {
+      state.emptyNext--;
+      return send(200, { model: "fake", message: { role: "assistant", content: "" }, done: true });
+    }
     const body = JSON.parse(Buffer.concat(chunks).toString() || "{}");
     const system: string = body.messages?.[0]?.content ?? "";
     const user: string = body.messages?.[1]?.content ?? "";
     let reply: unknown;
     if (system.includes("You are Docket's assistant")) {
       const msgs: { role: string; content: string }[] = body.messages ?? [];
-      const lastUser = [...msgs].reverse().find((m) => m.role === "user" && !m.content.startsWith("TOOL RESULT"))?.content ?? "";
+      const said = (m: { role: string; content: string }) => m.role === "user" && !/^(TOOL RESULT|NOTE:)/.test(m.content);
+      const lastUser = [...msgs].reverse().find(said)?.content ?? "";
       state.calls.push({ kind: "assistant", user: lastUser });
       reply = fakeAssistantStep(system, msgs, lastUser);
     } else if (system.includes("turn what someone types into to-do items")) {
@@ -283,7 +290,9 @@ function fakeAssistantStep(system: string, msgs: { role: string; content: string
   for (const clause of said.replace(/[.?!]+$/, "").split(/\s+and\s+(?=(?:move|push|remind|add|skip|snooze|find|search|check|mark|i\s|did|finished)\b)|,\s*then\s+/i)) {
     const c = clause.trim();
     let m: RegExpMatchArray | null;
-    if ((m = c.match(/^(?:move|push)\s+(.+?)\s+to\s+(.+)$/i))) {
+    if ((m = c.match(/^how\s+many\s+(\w+)\b.*?\bin\s+(.+?)(?:\s+and\b.*)?$/i))) {
+      plan.push({ ...EMPTY_STEP, tool: "calendar", query: m[1], when: m[2] });
+    } else if ((m = c.match(/^(?:move|push)\s+(.+?)\s+to\s+(.+)$/i))) {
       plan.push({ ...EMPTY_STEP, tool: "move_task", task_id: findId(m[1]), when: m[2] });
     } else if ((m = c.match(/^(?:i\s+)?(?:did|finished|mark)\s+(.+?)(?:\s+(?:as\s+)?done)?$/i))) {
       plan.push({ ...EMPTY_STEP, tool: "complete_task", task_id: findId(m[1]) });
@@ -300,8 +309,8 @@ function fakeAssistantStep(system: string, msgs: { role: string; content: string
     }
   }
   // Steps already taken for this message: the tool results after the last thing they said.
-  const lastSaid = msgs.map((m) => m.role === "user" && !m.content.startsWith("TOOL RESULT")).lastIndexOf(true);
-  const results = msgs.slice(lastSaid + 1).filter((m) => m.role === "user");
+  const lastSaid = msgs.map((m) => m.role === "user" && !/^(TOOL RESULT|NOTE:)/.test(m.content)).lastIndexOf(true);
+  const results = msgs.slice(lastSaid + 1).filter((m) => m.role === "user" && m.content.startsWith("TOOL RESULT"));
   if (results.length < plan.length) return plan[results.length];
   const last = results.at(-1)?.content.split("\n").slice(1).join(" ") ?? "";
   return { ...EMPTY_STEP, step: "reply", message: plan.length ? `Okay. ${last}` : "I can help with your tasks. What would you like to do?" };

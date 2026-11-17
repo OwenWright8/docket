@@ -12,7 +12,7 @@ import { addDays, hm, todayYmd, ymd } from "./time.ts";
 export type Item = Omit<ExternalItem, "id" | "source_id">;
 
 const PAST_DAYS = 7;
-const FUTURE_DAYS = 60;
+export const FUTURE_DAYS = 60;
 const MAX_ICS_BYTES = 8 * 1024 * 1024;
 
 export function httpsUrl(url: string): string {
