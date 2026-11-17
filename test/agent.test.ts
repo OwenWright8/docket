@@ -6,7 +6,7 @@ import { after, before, beforeEach, test } from "node:test";
 import assert from "node:assert/strict";
 import { openDb } from "../server/db.ts";
 import { buildApp } from "../server/app.ts";
-import { MAX_CHANGES, cleanHistory } from "../server/agent.ts";
+import { MAX_CHANGES, cleanHistory, itemMinutes, readRange } from "../server/agent.ts";
 import { FakeMailbox, startFakeOllama, type FakeOllama } from "../scripts/fakes.ts";
 
 const clock = new Date(2026, 10, 10, 9, 0); // Tue Nov 10 2026, 9 AM New York
@@ -173,4 +173,62 @@ test("the conversation carries on: earlier turns are sent along", async () => {
   ]);
   assert.equal(r.json.actions[0].kind, "moved");
   assert.equal(ollama.calls.at(-1)?.user, "Move the gecko feeding to tomorrow");
+});
+
+test("calendar questions: Docket finds the shifts in a month and adds up the hours itself", async () => {
+  const db = ctx.engine.db;
+  db.exec("DELETE FROM external_items; DELETE FROM sources;");
+  const src = (name: string) =>
+    Number(db.prepare("INSERT INTO sources (kind, name, url, created_at) VALUES ('ics', ?, 'https://cal.example/x.ics', 0)").run(name).lastInsertRowid);
+  const fire = src("Fire Schedule");
+  const er = src("Hospital Schedule");
+  const add = (source: number, id: string, title: string, date: string, time: string | null, endDate: string | null, endTime: string | null, context: string) =>
+    db
+      .prepare("INSERT INTO external_items (source_id, ext_id, kind, title, date, end_date, time, end_time, location, context, url) VALUES (?, ?, 'event', ?, ?, ?, ?, ?, NULL, ?, NULL)")
+      .run(source, id, title, date, endDate, time, endTime, context);
+  add(fire, "f0", "Jackson TWP - B Shift", "2026-11-29", "07:00", "2026-11-30", "07:00", "Fire Schedule"); // November: not counted
+  add(fire, "f1", "Jackson TWP - B Shift", "2026-12-02", "07:00", "2026-12-03", "07:00", "Fire Schedule");
+  add(fire, "f2", "Jackson TWP - B Shift", "2026-12-11", "07:00", "2026-12-12", "07:00", "Fire Schedule");
+  add(fire, "f3", "Jackson TWP - B Shift", "2026-12-20", "07:00", "2026-12-21", "07:00", "Fire Schedule");
+  add(er, "e1", "Owen - ER", "2026-12-05", "06:00", null, "18:00", "Hospital Schedule");
+  add(fire, "f4", "Station BBQ", "2026-12-24", null, null, null, "Fire Schedule");
+
+  const r = await say("How many fire shifts do I work in December and what are the total hours?");
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(r.json.actions.length, 0, "a question changes nothing");
+  // Three 24-hour B shifts (the BBQ is all-day and the ER shift is another calendar).
+  assert.match(r.json.reply, /4 items matching "fire" from Tue Dec 1 to Thu Dec 31; 3 with times adding up to 72 hours, plus 1 all-day/);
+
+  db.exec("DELETE FROM external_items; DELETE FROM sources;");
+});
+
+test("date ranges and lengths for the calendar tool", () => {
+  const now = new Date(2026, 10, 17, 16, 0); // Tue Nov 17 2026
+  assert.deepEqual(readRange("December", now), { from: "2026-12-01", to: "2026-12-31" });
+  assert.deepEqual(readRange("in dec", now), { from: "2026-12-01", to: "2026-12-31" });
+  assert.deepEqual(readRange("October", now), { from: "2027-10-01", to: "2027-10-31" }, "a month that's passed means next year");
+  assert.deepEqual(readRange("November", now), { from: "2026-11-01", to: "2026-11-30" });
+  assert.deepEqual(readRange("this month", now), { from: "2026-11-17", to: "2026-11-30" });
+  assert.deepEqual(readRange("next month", now), { from: "2026-12-01", to: "2026-12-31" });
+  assert.deepEqual(readRange("next week", now), { from: "2026-11-22", to: "2026-11-28" });
+  assert.deepEqual(readRange("Dec 1 to Dec 15", now), { from: "2026-12-01", to: "2026-12-15" });
+  assert.deepEqual(readRange("next 10 days", now), { from: "2026-11-17", to: "2026-11-27" });
+  assert.deepEqual(readRange("tomorrow", now), { from: "2026-11-18", to: "2026-11-18" });
+  assert.equal(readRange("sometime", now), null);
+  assert.equal(itemMinutes({ date: "2026-12-02", time: "07:00", end_date: "2026-12-03", end_time: "07:00" }), 24 * 60);
+  assert.equal(itemMinutes({ date: "2026-12-05", time: "06:00", end_date: null, end_time: "18:00" }), 12 * 60);
+  assert.equal(itemMinutes({ date: "2026-12-05", time: "19:00", end_date: null, end_time: "07:00" }), 12 * 60, "past midnight without an end date");
+  assert.equal(itemMinutes({ date: "2026-12-24", time: null, end_date: null, end_time: null }), null);
+});
+
+test("an empty reply from the model is asked again once, not shown as an error", async () => {
+  await api("POST", "/tasks", { title: "Feed the gecko", dueDate: "2026-11-10" });
+  ollama.emptyNext = 1;
+  const r = await say("Move the gecko feeding to tomorrow");
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(r.json.actions[0].kind, "moved");
+  ollama.emptyNext = 5;
+  const r2 = await say("Move the gecko feeding to Friday");
+  assert.equal(r2.status, 502, "twice in a row is a real failure");
+  ollama.emptyNext = 0;
 });
