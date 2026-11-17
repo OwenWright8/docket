@@ -11,6 +11,11 @@ import { addDays, hm, isHm, isYmd, shortDate, todayYmd, WEEKDAY_LONG, weekday } 
 
 export class AiError extends Error {}
 
+export interface ChatMessage {
+  role: "system" | "user" | "assistant";
+  content: string;
+}
+
 export interface AiConfig {
   provider: "ollama" | "openai";
   url: string;
@@ -54,7 +59,19 @@ export class AiClient {
 
   /** One chat turn whose reply must match `schema`. Returns the parsed object. */
   async json<T>(system: string, user: string, schema: object): Promise<T> {
+    return this.chatJson<T>(
+      [
+        { role: "system", content: system },
+        { role: "user", content: user },
+      ],
+      schema,
+    );
+  }
+
+  /** A whole conversation whose next reply must match `schema` (the assistant's steps). */
+  async chatJson<T>(messages: ChatMessage[], schema: object, opts: { temperature?: number } = {}): Promise<T> {
     const root = base(this.cfg.url);
+    const temperature = opts.temperature ?? 0.1;
     let content: unknown;
     if (this.cfg.provider === "ollama") {
       const res = await this.fetch(
@@ -67,11 +84,8 @@ export class AiClient {
             stream: false,
             format: schema,
             keep_alive: "10m",
-            messages: [
-              { role: "system", content: system },
-              { role: "user", content: user },
-            ],
-            options: { temperature: 0.1, num_ctx: this.cfg.context ?? 8192 },
+            messages,
+            options: { temperature, num_ctx: this.cfg.context ?? 8192 },
           }),
         },
         this.cfg.timeoutMs ?? 180_000,
@@ -85,12 +99,9 @@ export class AiClient {
           headers: this.headers(),
           body: JSON.stringify({
             model: this.cfg.model,
-            temperature: 0.1,
+            temperature,
             response_format: { type: "json_schema", json_schema: { name: "reply", strict: true, schema } },
-            messages: [
-              { role: "system", content: system },
-              { role: "user", content: user },
-            ],
+            messages,
           }),
         },
         this.cfg.timeoutMs ?? 180_000,
@@ -166,7 +177,7 @@ const TASKS_SCHEMA = {
 };
 
 /** The next two weeks spelled out: small models are much better at reading a date than working one out. */
-function calendar(now: Date): string {
+export function calendar(now: Date): string {
   const today = todayYmd(now);
   const lines = [];
   for (let i = 0; i < 14; i++) {

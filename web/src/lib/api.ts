@@ -290,3 +290,30 @@ export interface MicrosoftFlow {
   accountId?: number;
   email?: string;
 }
+
+// --- The assistant -----------------------------------------------------------------
+
+export interface ChatTurn {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export type AssistantUndo =
+  | { type: "delete"; taskId: number }
+  | { type: "log"; logId: number }
+  | { type: "move"; taskId: number; dueDate: string | null; dueTime: string | null }
+  | { type: "unsnooze"; taskId: number; snoozedUntil: number | null };
+
+export interface AssistantAction {
+  kind: "added" | "done" | "skipped" | "moved" | "snoozed";
+  taskId: number;
+  text: string;
+  undo: AssistantUndo;
+  task: Task;
+}
+
+export interface AssistantReply {
+  reply: string;
+  actions: AssistantAction[];
+  steps: number;
+}

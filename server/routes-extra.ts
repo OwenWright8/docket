@@ -4,6 +4,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { actPage, runAct } from "./actions.ts";
 import { aiAnswer } from "./ai.ts";
 import { askFacts } from "./ask.ts";
+import { cleanHistory, runAgent, undoAction } from "./agent.ts";
 import { createWidgetKey, useWidgetKey } from "./auth.ts";
 import { type DB, type SentRow, type SourceRow, errorText, getSettings } from "./db.ts";
 import type { Engine } from "./engine.ts";
@@ -211,6 +212,30 @@ export async function registerExtras(app: FastifyInstance, db: DB, engine: Engin
       engine.noteAi(errorText(err));
       return reply.code(502).send({ error: `The AI couldn't answer: ${errorText(err)}` });
     }
+  });
+
+  // --- The assistant: a conversation that can change your tasks ---------------------------
+
+  app.post<{ Body: { messages?: unknown } }>("/api/assistant", async (req, reply) => {
+    const history = cleanHistory(req.body?.messages);
+    if (!history) return reply.code(400).send({ error: "Say something" });
+    const s = getSettings(db);
+    const ai = engine.client(s);
+    if (!ai) return reply.code(400).send({ error: "The assistant needs your local AI. Set it up in Settings." });
+    try {
+      const r = await runAgent(ai, db, history, { now: now(), aboutMe: s.aboutMe });
+      engine.noteAi(null);
+      return r;
+    } catch (err) {
+      engine.noteAi(errorText(err));
+      return reply.code(502).send({ error: `The assistant couldn't answer: ${errorText(err)}` });
+    }
+  });
+
+  app.post<{ Body: { undo?: unknown } }>("/api/assistant/undo", async (req, reply) => {
+    const r = undoAction(db, req.body?.undo);
+    if (!r.ok) return reply.code(409).send({ error: r.error });
+    return { ok: true, message: r.message };
   });
 
   // --- Homepage widget ---------------------------------------------------------------------

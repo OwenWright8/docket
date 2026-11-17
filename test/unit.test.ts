@@ -106,3 +106,13 @@ test("email: basic signals and sender rules", () => {
   assert.equal(normalizePattern("Me@Example.com"), "me@example.com");
   assert.equal(normalizePattern("not a domain"), null);
 });
+
+test("quick add keeps titles like Prof. and Dr. together, and reads \"before Friday\" like \"by Friday\"", () => {
+  const now = new Date(2026, 10, 17, 16, 0); // Tue Nov 17
+  const [lee, ...rest] = parseQuickAdd("Reply to Prof. Lee before Friday at 9am", { now });
+  assert.equal(rest.length, 0);
+  assert.deepEqual([lee.title, lee.dueDate, lee.dueTime], ["Reply to Prof. Lee", "2026-11-20", "09:00"]);
+  assert.equal(parseQuickAdd("Email Dr. Smith tomorrow", { now })[0].title, "Email Dr. Smith");
+  // A real full stop still starts a new task.
+  assert.equal(parseQuickAdd("Call mom tomorrow. Pay rent Friday", { now }).length, 2);
+});

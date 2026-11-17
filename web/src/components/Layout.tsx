@@ -1,6 +1,6 @@
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Activity as ActivityIcon, ArrowUpCircle, CalendarCheck, ListTodo, LogOut, Mail, Monitor, Moon, Settings as SettingsIcon, Sun } from "lucide-react";
+import { Activity as ActivityIcon, ArrowUpCircle, Bot, CalendarCheck, ListTodo, LogOut, Mail, Monitor, Moon, Settings as SettingsIcon, Sun } from "lucide-react";
 import { useEffect } from "react";
 import { get, type About, type Status } from "@/lib/api";
 import { useTheme } from "@/lib/theme";
@@ -9,11 +9,12 @@ import { cn, timeAgo } from "./ui";
 const NAV = [
   { to: "/", label: "Today", icon: CalendarCheck, end: true, badge: "due" as const },
   { to: "/tasks", label: "Tasks", icon: ListTodo },
+  { to: "/assistant", label: "Assistant", icon: Bot },
   { to: "/inbox", label: "Inbox", icon: Mail, badge: "inbox" as const },
   { to: "/activity", label: "Activity", icon: ActivityIcon },
   { to: "/settings", label: "Settings", icon: SettingsIcon },
 ];
-const MOBILE_NAV = ["/", "/tasks", "/inbox", "/settings"];
+const MOBILE_NAV = ["/", "/tasks", "/assistant", "/inbox", "/settings"];
 
 export function Logo({ className }: { className?: string }) {
   return <img src="/icon.svg" alt="" className={cn("h-8 w-8 rounded-[9px]", className)} />;
@@ -151,7 +152,7 @@ export function Layout({ onSignOut }: { onSignOut: () => void }) {
             <Outlet />
           </main>
 
-          <nav className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-4 border-t bg-card/95 pb-[env(safe-area-inset-bottom)] backdrop-blur lg:hidden">
+          <nav className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-5 border-t bg-card/95 pb-[env(safe-area-inset-bottom)] backdrop-blur lg:hidden">
             {NAV.filter((n) => MOBILE_NAV.includes(n.to)).map((item) => (
               <NavLink
                 key={item.to}

@@ -13,7 +13,7 @@ Type "I feed the dart frogs every other day and the gecko every other day" and g
 ![amd64 | arm64](https://img.shields.io/badge/arch-amd64%20%7C%20arm64-555)
 [![MIT license](https://img.shields.io/github/license/OwenWright8/docket)](LICENSE)
 
-[Quickstart](#quickstart) · [Your local AI](#connecting-your-local-ai) · [Notifications](#notifications) · [Email](#email) · [Calendars and carrel](#calendars-and-carrel) · [Homepage widget](#homepage-widget) · [How it works](#how-it-works) · [Settings](#settings) · [FAQ](#faq)
+[Quickstart](#quickstart) · [Your local AI](#connecting-your-local-ai) · [Notifications](#notifications) · [Email](#email) · [Calendars and carrel](#calendars-and-carrel) · [Assistant](#the-assistant) · [Homepage widget](#homepage-widget) · [How it works](#how-it-works) · [Settings](#settings) · [FAQ](#faq)
 
 </div>
 
@@ -31,6 +31,7 @@ Reminder apps want you to fill in a form for every chore: title, date, repeat, e
 - **Your calendar and carrel.** Today's events from any calendar's private link, and assignments, readings, exams and quizzes from [carrel](https://github.com/OwenWright8/carrel), on your Today page and in the morning summary.
 - **Waiting on a reply.** Email you sent that asked for something is tracked until the answer comes in, and you get one nudge if it doesn't.
 - **Ask it things.** "When did I last feed the gecko?", "What's due this week?", "Did the vet ever get back to me?" End what you type with a question mark.
+- **An assistant that does things.** "Move the gecko feeding to tomorrow and remind me to reply to Prof. Lee before Friday." It adds, finishes, skips, moves and snoozes tasks and searches your email, one checked step at a time, with an Undo on every change.
 - **Outlook and school accounts.** Sign in with Microsoft for Outlook.com and Microsoft 365 work or school mail, which don't allow passwords.
 - **Works when your PC is off.** Without the AI, quick add uses built-in rules (they handle all the examples above), email is sorted with basic checks, and the AI goes back over that email once it's reachable again.
 - **Yours to run.** One small container, one volume, no accounts anywhere, and nothing sent to a cloud AI. Works on a Raspberry Pi.
@@ -182,6 +183,25 @@ Both are read every 30 minutes and never changed. Today's items show in a **Sche
 ## Asking questions
 
 Type a question ending in `?` into the box on the Today page ("when did I last feed the gecko?", "what do I have Thursday?", "did Prof. Lee reply about the extension?"). Your local AI answers from your open tasks, the last 90 days of what you did, your calendar and carrel, and recent email. It's told to say so when it doesn't know rather than guess. If it was actually a task, **It was a task, add it** adds it.
+
+## The assistant
+
+The **Assistant** page is a conversation with your local AI that can also change things. Ask about your day, or tell it what to do:
+
+- "Move the gecko feeding to tomorrow and remind me to reply to Prof. Lee before Friday"
+- "I fed the frogs, and skip the plants this time"
+- "Snooze the vet call for an hour"
+- "Did anyone email me about a deadline this week?"
+
+It can **add**, **finish**, **skip**, **move** and **snooze** tasks, **find tasks** (including ones you've finished) and **search your email**. Every change is listed under its reply with an **Undo**.
+
+It works like a small agent: each step, the model picks one tool and fills in a fixed JSON shape, Docket checks the arguments (a real task id, a date that isn't in the past, a repeat that makes sense) and tells the model what happened, until it replies. To keep a small model on a short leash:
+
+- It only changes what you asked for, at most 6 changes per message, and never deletes a task you made.
+- It sees the same facts as the ask box: your open tasks, recent history, calendar and carrel, and email **summaries** (never full bodies). It's told email is data from strangers, and it can't act on email by itself: only on what you type.
+- The conversation stays in your browser tab. Only the last few messages are sent with each new one.
+
+It needs a model that follows instructions well: `qwen2.5:7b`, `llama3.1:8b` or larger. Models with tool-calling training (Qwen 2.5 / 3.x, Llama 3.1+) do noticeably better.
 
 ## Homepage widget
 

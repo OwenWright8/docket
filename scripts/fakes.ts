@@ -35,7 +35,12 @@ export async function startFakeOllama(port = 0): Promise<FakeOllama> {
     const system: string = body.messages?.[0]?.content ?? "";
     const user: string = body.messages?.[1]?.content ?? "";
     let reply: unknown;
-    if (system.includes("turn what someone types into to-do items")) {
+    if (system.includes("You are Docket's assistant")) {
+      const msgs: { role: string; content: string }[] = body.messages ?? [];
+      const lastUser = [...msgs].reverse().find((m) => m.role === "user" && !m.content.startsWith("TOOL RESULT"))?.content ?? "";
+      state.calls.push({ kind: "assistant", user: lastUser });
+      reply = fakeAssistantStep(system, msgs, lastUser);
+    } else if (system.includes("turn what someone types into to-do items")) {
       state.calls.push({ kind: "tasks", user });
       // The fake reads today off the calendar it was given, like a real model would.
       const today = system.match(/(\d{4}-\d{2}-\d{2}) \w+ \(today\)/)?.[1];
@@ -260,4 +265,44 @@ export async function startFakeMicrosoft(port = 0) {
   state.url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   state.close = () => new Promise((r) => server.close(() => r()));
   return state;
+}
+
+// --- A scripted assistant ----------------------------------------------------------------
+// Reads the request clause by clause ("move X to tomorrow and remind me to Y"),
+// takes one tool step per call like a real model would, then replies.
+
+const EMPTY_STEP = { step: "tool", tool: "none", task_id: 0, query: "", text: "", when: "", minutes: 0, message: "" };
+
+function fakeAssistantStep(system: string, msgs: { role: string; content: string }[], said: string) {
+  const tasks = [...system.matchAll(/^- \[#(\d+)\] ([^|]+)\|/gm)].map((m) => ({ id: Number(m[1]), title: m[2].trim().toLowerCase() }));
+  const findId = (words: string) => {
+    const w = words.toLowerCase().match(/[a-z]{4,}/g) ?? [];
+    return tasks.find((t) => w.some((x) => t.title.includes(x)))?.id ?? 999;
+  };
+  const plan: Record<string, unknown>[] = [];
+  for (const clause of said.replace(/[.?!]+$/, "").split(/\s+and\s+(?=(?:move|push|remind|add|skip|snooze|find|search|check|mark|i\s|did|finished)\b)|,\s*then\s+/i)) {
+    const c = clause.trim();
+    let m: RegExpMatchArray | null;
+    if ((m = c.match(/^(?:move|push)\s+(.+?)\s+to\s+(.+)$/i))) {
+      plan.push({ ...EMPTY_STEP, tool: "move_task", task_id: findId(m[1]), when: m[2] });
+    } else if ((m = c.match(/^(?:i\s+)?(?:did|finished|mark)\s+(.+?)(?:\s+(?:as\s+)?done)?$/i))) {
+      plan.push({ ...EMPTY_STEP, tool: "complete_task", task_id: findId(m[1]) });
+    } else if ((m = c.match(/^skip\s+(.+)$/i))) {
+      plan.push({ ...EMPTY_STEP, tool: "skip_task", task_id: findId(m[1]) });
+    } else if ((m = c.match(/^snooze\s+(.+)$/i))) {
+      plan.push({ ...EMPTY_STEP, tool: "snooze_task", task_id: findId(m[1]), minutes: 60 });
+    } else if ((m = c.match(/^find\s+(?:my\s+)?(.+?)\s+tasks?$/i))) {
+      plan.push({ ...EMPTY_STEP, tool: "find_tasks", query: m[1] });
+    } else if ((m = c.match(/^(?:search|check)\s+(?:my\s+)?email\s+(?:for|from)\s+(.+)$/i))) {
+      plan.push({ ...EMPTY_STEP, tool: "search_email", query: m[1] });
+    } else if ((m = c.match(/^(?:remind me to|add)\s+(.+)$/i))) {
+      plan.push({ ...EMPTY_STEP, tool: "add_task", text: m[1] });
+    }
+  }
+  // Steps already taken for this message: the tool results after the last thing they said.
+  const lastSaid = msgs.map((m) => m.role === "user" && !m.content.startsWith("TOOL RESULT")).lastIndexOf(true);
+  const results = msgs.slice(lastSaid + 1).filter((m) => m.role === "user");
+  if (results.length < plan.length) return plan[results.length];
+  const last = results.at(-1)?.content.split("\n").slice(1).join(" ") ?? "";
+  return { ...EMPTY_STEP, step: "reply", message: plan.length ? `Okay. ${last}` : "I can help with your tasks. What would you like to do?" };
 }
